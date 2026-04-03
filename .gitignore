@@ -6,3 +6,7 @@ node_modules
 .lingma
 .vscode
 bin/claude
+
+# Computer Use runtime (auto-generated)
+.runtime/
+extracted-natives/
