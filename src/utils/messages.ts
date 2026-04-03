@@ -687,6 +687,16 @@ export function extractTag(html: string, tagName: string): string | null {
 }
 
 export function isNotEmptyMessage(message: Message): boolean {
+  // Defensive check for undefined/null messages
+  if (!message || typeof message !== 'object') {
+    return false
+  }
+
+  // Defensive check for missing type field
+  if (!message.type) {
+    return false
+  }
+
   if (
     message.type === 'progress' ||
     message.type === 'attachment' ||
@@ -746,7 +756,8 @@ export function normalizeMessages(messages: Message[]): NormalizedMessage[] {
   // This flag is set to true once we encounter a message with multiple content blocks,
   // and remains true for all subsequent messages in the normalization process.
   let isNewChain = false
-  return messages.flatMap(message => {
+  // Filter out undefined/null messages defensively
+  return messages.filter((m): m is Message => m != null && typeof m === 'object' && 'type' in m).flatMap(message => {
     switch (message.type) {
       case 'assistant': {
         isNewChain = isNewChain || message.message.content.length > 1

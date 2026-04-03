@@ -336,6 +336,11 @@ export function renderModelSetting(setting: ModelName | ModelAlias): string {
     return 'Opus Plan'
   }
   if (isModelAlias(setting)) {
+    // 对于 opencode provider，返回解析后的实际模型名
+    if (getAPIProvider() === 'opencode') {
+      const resolved = parseUserSpecifiedModel(setting)
+      return resolved
+    }
     return capitalize(setting)
   }
   return renderModelName(setting)
@@ -347,6 +352,11 @@ export function renderModelSetting(setting: ModelName | ModelAlias): string {
  * if the model is not recognized as a public model.
  */
 export function getPublicModelDisplayName(model: ModelName): string | null {
+  // 对于 opencode provider，不将自定义模型名映射回 Claude 模型名
+  if (getAPIProvider() === 'opencode') {
+    return null
+  }
+  
   switch (model) {
     case getModelStrings().opus46:
       return 'Opus 4.6'

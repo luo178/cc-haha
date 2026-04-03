@@ -111,6 +111,12 @@ export function isModelAllowed(model: string): boolean {
   const normalizedModel = resolvedModel.trim().toLowerCase()
   const normalizedAllowlist = availableModels.map(m => m.trim().toLowerCase())
 
+  // 允许非 Claude 的自定义模型（第三方 API 如 opencode、MiniMax 等）
+  // availableModels 只限制 Claude 模型家族，不应拦截第三方模型
+  if (!normalizedModel.includes('claude-') && !isModelAlias(normalizedModel)) {
+    return true
+  }
+
   // Direct match (alias-to-alias or full-name-to-full-name)
   // Skip family aliases that have been narrowed by specific entries —
   // e.g., "opus" in ["opus", "opus-4-5"] should NOT directly match,

@@ -15,3 +15,5 @@ Object.assign(globalThis, {
     ISSUES_EXPLAINER: '',
   },
 });
+
+import './cli.tsx';

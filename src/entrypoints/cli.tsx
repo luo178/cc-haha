@@ -1,5 +1,17 @@
 import { feature } from 'bun:bundle';
 
+// eslint-disable-next-line custom-rules/no-top-level-side-effects
+(globalThis as any).MACRO = (globalThis as any).MACRO ?? {
+  VERSION: process.env.CLAUDE_CODE_LOCAL_VERSION ?? '3.1.88-local',
+  PACKAGE_URL: process.env.CLAUDE_CODE_LOCAL_PACKAGE_URL ?? 'claude-code-local',
+  NATIVE_PACKAGE_URL: process.env.CLAUDE_CODE_LOCAL_PACKAGE_URL ?? 'claude-code-local',
+  BUILD_TIME: process.env.CLAUDE_CODE_LOCAL_BUILD_TIME ?? new Date().toISOString(),
+  FEEDBACK_CHANNEL: 'local',
+  VERSION_CHANGELOG: '',
+  ISSUES_EXPLAINER: '',
+};
+const MACRO = (globalThis as any).MACRO;
+
 // Bugfix for corepack auto-pinning, which adds yarnpkg to peoples' package.jsons
 // eslint-disable-next-line custom-rules/no-top-level-side-effects
 process.env.COREPACK_ENABLE_AUTO_PIN = '0';

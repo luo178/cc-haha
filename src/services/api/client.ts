@@ -1,4 +1,5 @@
 import Anthropic, { type ClientOptions } from '@anthropic-ai/sdk'
+import { OpencodeAdapter } from './opencodeAdapter.js'
 import { randomUUID } from 'crypto'
 import type { GoogleAuth } from 'google-auth-library'
 import {
@@ -15,6 +16,7 @@ import { getSmallFastModel } from 'src/utils/model/model.js'
 import {
   getAPIProvider,
   isFirstPartyAnthropicBaseUrl,
+  isOpencodeProvider,
 } from 'src/utils/model/providers.js'
 import { getProxyFetchOptions } from 'src/utils/proxy.js'
 import {
@@ -127,10 +129,36 @@ export async function getAnthropicClient({
   if (additionalProtectionEnabled) {
     defaultHeaders['x-anthropic-additional-protection'] = 'true'
   }
+  const createRequestId = (): string => {
+        if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+            return crypto.randomUUID();
+        }
+        return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    };
+  // Add OpenCode provider headers when using opencode.ai endpoint
+  // Matching the headers used by native opencode client to avoid rate limits
+  if (isOpencodeProvider()) {
+    const opencodeProject = process.env.VITE_OPENCODE_PROJECT ?? 'opencode'
+    const opencodeClient = process.env.OPENCODE_CLIENT ?? 'cli'
+    const sessionId = getSessionId()
+    defaultHeaders['x-opencode-project'] = opencodeProject
+    defaultHeaders['x-opencode-client'] = opencodeClient
+    defaultHeaders['x-opencode-session'] = sessionId
+    defaultHeaders['x-opencode-request'] = createRequestId()
+    logForDebugging(
+      `[API:opencode] Added x-opencode-* headers - project: ${opencodeProject}, client: ${opencodeClient}, session: ${sessionId}`,
+    )
+  }
 
   logForDebugging('[API:auth] OAuth token check starting')
   await checkAndRefreshOAuthTokenIfNeeded()
   logForDebugging('[API:auth] OAuth token check complete')
+
+  // When using opencode provider, return OpenAI-compatible adapter instead of Anthropic client
+  if (isOpencodeProvider()) {
+    logForDebugging('[API:opencode] Using OpenAI-compatible adapter for opencode provider')
+    return new OpencodeAdapter() as unknown as Anthropic
+  }
 
   if (!isClaudeAISubscriber()) {
     await configureApiKeyHeaders(defaultHeaders, getIsNonInteractiveSession())
