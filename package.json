@@ -9,7 +9,10 @@
   "scripts": {
     "claude-haha": "bun run ./bin/claude-haha",
     "start": "bun run ./bin/claude-haha",
-    "build": "bun build ./src/entrypoints/cli-compiled.ts --compile --outfile ./bin/claude --define MACRO=globalThis.MACRO"
+    "build": "bun build ./src/entrypoints/cli-compiled.ts --compile --outfile ./bin/claude --define MACRO=globalThis.MACRO",
+    "docs:dev": "vitepress dev docs",
+    "docs:build": "vitepress build docs",
+    "docs:preview": "vitepress preview docs"
   },
   "dependencies": {
     "@anthropic-ai/bedrock-sdk": "^0.26.4",
@@ -95,5 +98,9 @@
     "xss": "^1.0.15",
     "yaml": "^2.8.3",
     "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "vitepress": "^1.6.3",
+    "vue": "^3.5.13"
   }
 }
