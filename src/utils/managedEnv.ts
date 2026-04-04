@@ -91,6 +91,23 @@ function filterSettingsEnv(
 }
 
 /**
+ * Apply filtered settings env to process.env, respecting .env file priority.
+ * .env 文件由 `bun --env-file=.env` 在 JS 执行前加载到 process.env，
+ * 此函数只在 process.env 中不存在该 key 时才赋值，确保 .env 优先。
+ */
+function applyFilteredSettingsEnv(
+  sourceEnv: Record<string, string> | undefined,
+): void {
+  const filtered = filterSettingsEnv(sourceEnv)
+  for (const [key, value] of Object.entries(filtered)) {
+    // .env 文件优先，settings.json 仅作为兜底值
+    if (process.env[key] === undefined) {
+      process.env[key] = value
+    }
+  }
+}
+
+/**
  * Trusted setting sources whose env vars can be applied before the trust dialog.
  *
  * - userSettings (~/.claude/settings.json): controlled by the user, not project-specific
@@ -133,7 +150,8 @@ export function applySafeConfigEnvironmentVariables(): void {
   // Global config (~/.claude.json) is user-controlled. In CCD mode,
   // filterSettingsEnv strips keys that were in the spawn env snapshot so
   // the desktop host's operational vars (OTEL, etc.) are not overridden.
-  Object.assign(process.env, filterSettingsEnv(getGlobalConfig().env))
+  // .env 文件优先，settings.json 仅作为兜底值
+  applyFilteredSettingsEnv(getGlobalConfig().env)
 
   // Apply ALL env vars from trusted setting sources, policySettings last.
   // Gate on isSettingSourceEnabled so SDK settingSources: [] (isolation mode)
@@ -142,10 +160,8 @@ export function applySafeConfigEnvironmentVariables(): void {
   for (const source of TRUSTED_SETTING_SOURCES) {
     if (source === 'policySettings') continue
     if (!isSettingSourceEnabled(source)) continue
-    Object.assign(
-      process.env,
-      filterSettingsEnv(getSettingsForSource(source)?.env),
-    )
+    // .env 文件优先，settings.json 仅作为兜底值
+    applyFilteredSettingsEnv(getSettingsForSource(source)?.env)
   }
 
   // Compute remote-managed-settings eligibility now, with userSettings and
@@ -156,10 +172,8 @@ export function applySafeConfigEnvironmentVariables(): void {
   // dependency visible: non-policy env → eligibility → policy env.
   isRemoteManagedSettingsEligible()
 
-  Object.assign(
-    process.env,
-    filterSettingsEnv(getSettingsForSource('policySettings')?.env),
-  )
+  // .env 文件优先，settings.json 仅作为兜底值
+  applyFilteredSettingsEnv(getSettingsForSource('policySettings')?.env)
 
   // Apply only safe env vars from the fully-merged settings (which includes
   // project-scoped sources). For safe vars that also exist in trusted sources,
@@ -172,7 +186,10 @@ export function applySafeConfigEnvironmentVariables(): void {
   const settingsEnv = filterSettingsEnv(getSettings_DEPRECATED()?.env)
   for (const [key, value] of Object.entries(settingsEnv)) {
     if (SAFE_ENV_VARS.has(key.toUpperCase())) {
-      process.env[key] = value
+      // .env 文件优先，settings.json 仅作为兜底值
+      if (process.env[key] === undefined) {
+        process.env[key] = value
+      }
     }
   }
 }
@@ -185,9 +202,10 @@ export function applySafeConfigEnvironmentVariables(): void {
  * dangerous environment variables such as LD_PRELOAD, PATH, etc.
  */
 export function applyConfigEnvironmentVariables(): void {
-  Object.assign(process.env, filterSettingsEnv(getGlobalConfig().env))
+  // .env 文件优先，settings.json 仅作为兜底值
+  applyFilteredSettingsEnv(getGlobalConfig().env)
 
-  Object.assign(process.env, filterSettingsEnv(getSettings_DEPRECATED()?.env))
+  applyFilteredSettingsEnv(getSettings_DEPRECATED()?.env)
 
   // Clear caches so agents are rebuilt with the new env vars
   clearCACertsCache()

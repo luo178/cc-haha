@@ -315,7 +315,7 @@ export function isOpus1mMergeEnabled(): boolean {
   if (
     is1mContextDisabled() ||
     isProSubscriber() ||
-    getAPIProvider() !== 'firstParty'
+    (getAPIProvider() !== 'firstParty' && getAPIProvider() !== 'opencode')
   ) {
     return false
   }
