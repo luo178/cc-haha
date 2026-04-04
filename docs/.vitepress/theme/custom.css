@@ -12,3 +12,23 @@
   --vp-c-brand-3: #ea9a7a;
   --vp-c-brand-soft: rgba(217, 119, 87, 0.16);
 }
+
+/* Hero image larger */
+.VPHero .image-container {
+  max-width: 500px !important;
+  max-height: 500px !important;
+}
+
+.VPHero .image-container .image-src {
+  max-width: 500px !important;
+  max-height: 500px !important;
+}
+
+/* medium-zoom overlay */
+.medium-zoom-overlay {
+  z-index: 30;
+}
+
+.medium-zoom-image--opened {
+  z-index: 31;
+}
