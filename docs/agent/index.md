@@ -38,6 +38,24 @@
 
 ---
 
+### [03-agent-framework.md](./03-agent-framework.md) — Agent 框架深度解析
+
+从源码视角剖析 Claude Code 底层 Agent 架构的设计哲学，涵盖：
+
+- **核心 Agent 循环**：AsyncGenerator 状态机、五阶段 while(true) 循环
+- **系统提示词工程**：分层构建、缓存边界、CLAUDE.md 加载机制
+- **工具系统设计**：完整生命周期管理、三阶段注册、七步执行管道
+- **上下文管理与压缩**：四级渐进式压缩、系统上下文注入、系统提醒
+- **技能与插件生态**：技能定义与发现、插件系统、钩子系统、MCP 集成
+- **权限与安全体系**：分层权限模型、规则模式匹配
+- **故障恢复机制**：6 种内置恢复策略、模型降级
+- **与 LangChain/ReAct 对比**：架构范式差异、为什么不用 ReAct
+- **为什么 Claude Code 能做到这么好**：7 大核心设计原则
+
+**适合人群**：想理解 AI Agent 框架设计的架构师、AI 应用开发者、技术研究者
+
+---
+
 ## 🖼️ 配图说明
 
 所有配图采用深色背景（#1a1a2e）+ Anthropic 品牌橙铜色（#D97757）风格，与 Claude Code 官方文档一致。
@@ -54,6 +72,10 @@
 | `08-background-task.png` | 后台任务引擎 — 生命周期状态机 | 实现原理 |
 | `09-teams-mailbox.png` | Teams 邮箱系统 — 消息路由拓扑 | 实现原理 |
 | `10-fork-cache.png` | Fork 缓存优化 — 字节级一致共享 | 实现原理 |
+| `11-agent-framework-overview.png` | Agent 框架架构总览 — 核心组件关系 | 框架解析 |
+| `12-agent-core-loop.png` | 核心 Agent 循环 — 五阶段状态机 | 框架解析 |
+| `13-system-prompt-pipeline.png` | 系统提示词构建 — 分层缓存流水线 | 框架解析 |
+| `14-context-compression.png` | 上下文压缩 — 四级渐进式策略 | 框架解析 |
 
 ---
 

@@ -32,12 +32,12 @@ features:
     title: Skills 系统
     details: 可扩展能力插件、自定义工作流、条件激活
     link: /skills/01-usage-guide
-  - icon: "\U0001F4BB"
-    title: Computer Use
-    details: 桌面控制功能 — 截屏、鼠标、键盘操作
-    link: /features/computer-use
   - icon: "\U0001F310"
     title: 第三方模型支持
     details: 接入 OpenAI、DeepSeek、Ollama 等任意兼容模型
     link: /guide/third-party-models
+  - icon: "\U0001F4BB"
+    title: Computer Use
+    details: 桌面控制功能 — 截屏、鼠标、键盘操作（Python Bridge 实现）
+    link: /features/computer-use
 ---

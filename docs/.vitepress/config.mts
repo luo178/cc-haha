@@ -1,5 +1,19 @@
 import { defineConfig } from 'vitepress'
 
+// GitHub-compatible slugify (matches github-slugger algorithm)
+// Makes heading anchor IDs consistent between VitePress and GitHub rendering
+function slugify(str: string): string {
+  return str
+    .replace(/<[^>]*>/g, '')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&amp;/g, '&')
+    .trim()
+    .toLowerCase()
+    .replace(/[^\p{L}\p{M}\p{N}\p{Pc}\- ]/gu, '')
+    .replace(/ /g, '-')
+}
+
 const zhSidebar = [
   {
     text: '快速开始',
@@ -9,12 +23,6 @@ const zhSidebar = [
       { text: '第三方模型', link: '/guide/third-party-models' },
       { text: '全局使用', link: '/guide/global-usage' },
       { text: '常见问题', link: '/guide/faq' },
-    ],
-  },
-  {
-    text: '功能',
-    items: [
-      { text: 'Computer Use', link: '/features/computer-use' },
     ],
   },
   {
@@ -34,6 +42,7 @@ const zhSidebar = [
       { text: '概览', link: '/agent/' },
       { text: '使用指南', link: '/agent/01-usage-guide' },
       { text: '实现原理', link: '/agent/02-implementation' },
+      { text: 'Agent 框架解析', link: '/agent/03-agent-framework' },
     ],
   },
   {
@@ -42,6 +51,22 @@ const zhSidebar = [
     items: [
       { text: '使用指南', link: '/skills/01-usage-guide' },
       { text: '实现原理', link: '/skills/02-implementation' },
+    ],
+  },
+  {
+    text: 'Channel 系统',
+    collapsed: false,
+    items: [
+      { text: '概览', link: '/channel/' },
+      { text: '架构解析', link: '/channel/01-channel-system' },
+    ],
+  },
+  {
+    text: 'Computer Use',
+    collapsed: false,
+    items: [
+      { text: '功能指南', link: '/features/computer-use' },
+      { text: '架构解析', link: '/features/computer-use-architecture' },
     ],
   },
   {
@@ -66,12 +91,6 @@ const enSidebar = [
     ],
   },
   {
-    text: 'Features',
-    items: [
-      { text: 'Computer Use', link: '/en/features/computer-use' },
-    ],
-  },
-  {
     text: 'Memory System',
     collapsed: false,
     items: [
@@ -88,6 +107,7 @@ const enSidebar = [
       { text: 'Overview', link: '/en/agent/' },
       { text: 'Usage Guide', link: '/en/agent/01-usage-guide' },
       { text: 'Implementation', link: '/en/agent/02-implementation' },
+      { text: 'Framework Deep Dive', link: '/en/agent/03-agent-framework' },
     ],
   },
   {
@@ -96,6 +116,22 @@ const enSidebar = [
     items: [
       { text: 'Usage Guide', link: '/en/skills/01-usage-guide' },
       { text: 'Implementation', link: '/en/skills/02-implementation' },
+    ],
+  },
+  {
+    text: 'Channel System',
+    collapsed: false,
+    items: [
+      { text: 'Overview', link: '/en/channel/' },
+      { text: 'Architecture', link: '/en/channel/01-channel-system' },
+    ],
+  },
+  {
+    text: 'Computer Use',
+    collapsed: false,
+    items: [
+      { text: 'Guide', link: '/en/features/computer-use' },
+      { text: 'Architecture', link: '/en/features/computer-use-architecture' },
     ],
   },
   {
@@ -113,6 +149,12 @@ export default defineConfig({
   description: '基于 Claude Code 泄露源码修复的本地可运行版本，支持接入任意 Anthropic 兼容 API',
   lastUpdated: true,
   base: '/',
+
+  markdown: {
+    anchor: {
+      slugify,
+    },
+  },
 
   head: [
     ['script', { async: '', src: 'https://www.googletagmanager.com/gtag/js?id=G-D42DM82263' }],

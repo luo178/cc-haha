@@ -38,6 +38,24 @@ A deep technical reference for developers covering:
 
 ---
 
+### [03-agent-framework.md](./03-agent-framework.md) — Agent Framework Deep Dive
+
+Deconstructing the architecture behind Claude Code's agent framework from source code, covering:
+
+- **Core Agent Loop**: AsyncGenerator state machine, five-phase while(true) loop
+- **System Prompt Engineering**: Layered construction, cache boundary, CLAUDE.md loading
+- **Tool System Design**: Full lifecycle management, three-stage registration, 7-step execution pipeline
+- **Context Management & Compression**: Four-level progressive compression, system context injection
+- **Skills & Plugin Ecosystem**: Skill definition and discovery, plugins, hooks, MCP integration
+- **Permission & Security Model**: Layered permission model, rule pattern matching
+- **Fault Recovery Mechanisms**: 6 built-in recovery strategies, model fallback
+- **Comparison with LangChain/ReAct**: Architecture paradigm differences, why not ReAct
+- **Why Claude Code Is So Good**: 7 core design principles
+
+**Target Audience**: Architects studying AI agent design, AI application developers, technical researchers
+
+---
+
 ## Illustration Notes
 
 All diagrams use a dark background (#1a1a2e) with Anthropic brand copper-orange (#D97757), consistent with Claude Code's official documentation style.
@@ -54,6 +72,10 @@ All diagrams use a dark background (#1a1a2e) with Anthropic brand copper-orange 
 | `08-background-task.png` | Background Task Engine — Lifecycle state machine | Implementation |
 | `09-teams-mailbox.png` | Teams Mailbox System — Message routing topology | Implementation |
 | `10-fork-cache.png` | Fork Cache Optimization — Byte-level consistent sharing | Implementation |
+| `11-agent-framework-overview.png` | Agent Framework Overview — Core component relationships | Framework Deep Dive |
+| `12-agent-core-loop.png` | Core Agent Loop — Five-phase state machine | Framework Deep Dive |
+| `13-system-prompt-pipeline.png` | System Prompt Pipeline — Layered cache pipeline | Framework Deep Dive |
+| `14-context-compression.png` | Context Compression — Four-level progressive strategy | Framework Deep Dive |
 
 ---
 
