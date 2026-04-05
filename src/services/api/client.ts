@@ -1,5 +1,9 @@
 import Anthropic, { type ClientOptions } from '@anthropic-ai/sdk'
-import { OpencodeAdapter } from './opencodeAdapter.js'
+import {
+  OPENCODE_HEADERS,
+  getOpencodeHeaders,
+  OpencodeAdapter
+} from './opencodeAdapter.js'
 import { randomUUID } from 'crypto'
 import type { GoogleAuth } from 'google-auth-library'
 import {
@@ -129,24 +133,13 @@ export async function getAnthropicClient({
   if (additionalProtectionEnabled) {
     defaultHeaders['x-anthropic-additional-protection'] = 'true'
   }
-  const createRequestId = (): string => {
-        if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
-            return crypto.randomUUID();
-        }
-        return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-    };
   // Add OpenCode provider headers when using opencode.ai endpoint
   // Matching the headers used by native opencode client to avoid rate limits
   if (isOpencodeProvider()) {
-    const opencodeProject = process.env.VITE_OPENCODE_PROJECT ?? 'opencode'
-    const opencodeClient = process.env.OPENCODE_CLIENT ?? 'cli'
-    const sessionId = getSessionId()
-    defaultHeaders['x-opencode-project'] = opencodeProject
-    defaultHeaders['x-opencode-client'] = opencodeClient
-    defaultHeaders['x-opencode-session'] = sessionId
-    defaultHeaders['x-opencode-request'] = createRequestId()
+    const opencodeHeaders = getOpencodeHeaders()
+    Object.assign(defaultHeaders, opencodeHeaders)
     logForDebugging(
-      `[API:opencode] Added x-opencode-* headers - project: ${opencodeProject}, client: ${opencodeClient}, session: ${sessionId}`,
+      `[API:opencode] Added x-opencode-* headers - project: ${opencodeHeaders[OPENCODE_HEADERS.PROJECT]}, client: ${opencodeHeaders[OPENCODE_HEADERS.CLIENT]}, session: ${opencodeHeaders[OPENCODE_HEADERS.SESSION]}`,
     )
   }
 

@@ -7,12 +7,13 @@ import type Anthropic from '@anthropic-ai/sdk'
 import { getSessionId } from '../../bootstrap/state.js'
 import { logForDebugging } from '../../utils/debug.js'
 
+const OPENCODE_HOST_PATTERN = 'opencode.ai'
 const OPENCODE_BASE_URL = 'https://opencode.ai/zen/v1'
 
 // 使用用户配置的 base URL（如果配置了 opencode.ai 相关地址），否则使用默认值
 function getOpencodeBaseUrl(): string {
   const userBaseUrl = process.env.ANTHROPIC_BASE_URL
-  if (userBaseUrl && userBaseUrl.includes('opencode.ai')) {
+  if (userBaseUrl && userBaseUrl.includes(OPENCODE_HOST_PATTERN)) {
     // 确保以 /v1 结尾（OpenAI 兼容接口）
     return userBaseUrl.endsWith('/v1') ? userBaseUrl : `${userBaseUrl.replace(/\/+$/, '')}/v1`
   }
@@ -20,7 +21,7 @@ function getOpencodeBaseUrl(): string {
 }
 
 // opencode 免费模型列表
-const FREE_MODELS = [
+const OPENCODE_FREE_MODELS = [
   'mimo-v2-omni-free',
   'mimo-v2-pro-free',
   'nemotron-3-super-free',
@@ -29,31 +30,82 @@ const FREE_MODELS = [
   'trinity-large-preview-free',
   'minimax-m2.5-free',
   'minimax-m2.7-free',
-]
-
+] as const
 // 默认使用 qwen3.6-plus-free
-const DEFAULT_MODEL = 'qwen3.6-plus-free'
+const OPENCODE_DEFAULT_MODEL = 'qwen3.6-plus-free'
+
+/** Environment variable names used by the OpenCode provider */
+const OPENCODE_ENV = {
+  /** API key for OpenCode (falls back to 'public' if not set) */
+  API_KEY: 'OPENCODE_API_KEY',
+  /** Project identifier (falls back to 'opencode') */
+  PROJECT: 'VITE_OPENCODE_PROJECT',
+  /** Client identifier (falls back to 'cli') */
+  CLIENT: 'OPENCODE_CLIENT',
+} as const
+
+/** HTTP header names used for OpenCode requests */
+export const OPENCODE_HEADERS = {
+  PROJECT: 'x-opencode-project',
+  CLIENT: 'x-opencode-client',
+  SESSION: 'x-opencode-session',
+  REQUEST: 'x-opencode-request',
+} as const
+
+/**
+ * Returns the default values for OpenCode environment variables.
+ * Separated so consumers (client.ts, opencodeAdapter.ts) can read
+ * the same defaults without duplication.
+ */
+function getOpencodeDefaults() {
+  return {
+    apiKey: process.env[OPENCODE_ENV.API_KEY] || 'public',
+    project: process.env[OPENCODE_ENV.PROJECT] ?? 'opencode',
+    client: process.env[OPENCODE_ENV.CLIENT] ?? 'cli',
+  }
+}
+
+/**
+ * Builds the OpenCode-specific headers object.
+ * @param sessionId - Optional session ID (falls back to getSessionId())
+ * @param requestId - Optional request ID (falls back to crypto.randomUUID())
+ */
+export function getOpencodeHeaders(sessionId?: string, requestId?: string) {
+  const defaults = getOpencodeDefaults()
+  return {
+    [OPENCODE_HEADERS.PROJECT]: defaults.project,
+    [OPENCODE_HEADERS.CLIENT]: defaults.client,
+    [OPENCODE_HEADERS.SESSION]: sessionId ?? getSessionId(),
+    [OPENCODE_HEADERS.REQUEST]: requestId ?? crypto.randomUUID(),
+  }
+}
+
+/**
+ * Resolves a requested model name to the actual model to use with OpenCode.
+ * If the requested model is in the free list, use it; otherwise fall back
+ * to the default model.
+ */
+function resolveOpencodeModel(requestedModel: string): string {
+  return (OPENCODE_FREE_MODELS as readonly string[]).includes(requestedModel)
+    ? requestedModel
+    : OPENCODE_DEFAULT_MODEL
+}
 
 export function createOpencodeClient(): OpenAI {
-  const apiKey = process.env.OPENCODE_API_KEY || 'public'
-  const opencodeProject = process.env.VITE_OPENCODE_PROJECT ?? 'opencode'
-  const opencodeClient = process.env.OPENCODE_CLIENT ?? 'cli'
-  const sessionId = getSessionId()
+  const defaults = getOpencodeDefaults()
+  const sessionId = getOpencodeHeaders()['x-opencode-session']
 
   const client = new OpenAI({
-    apiKey,
+    apiKey: defaults.apiKey,
     baseURL: getOpencodeBaseUrl(),
     defaultHeaders: {
-      'Authorization': `Bearer ${apiKey}`,
-      'x-opencode-project': opencodeProject,
-      'x-opencode-client': opencodeClient,
-      'x-opencode-session': sessionId,
-      'x-opencode-request': crypto.randomUUID(),
+      'Authorization': `Bearer ${defaults.apiKey}`,
+      ...getOpencodeHeaders(),
     },
   })
 
   logForDebugging(
-    `[API:opencode] Created OpenAI client for opencode - project: ${opencodeProject}, session: ${sessionId}`,
+    `[API:opencode] Created OpenAI client for opencode - project: ${defaults.project}, session: ${sessionId}`,
   )
 
   return client
@@ -386,7 +438,7 @@ export class OpencodeAdapter {
   ): Promise<AsyncIterable<Anthropic.Messages.RawMessageStreamEvent>> & { withResponse: () => Promise<{ data: AsyncIterable<Anthropic.Messages.RawMessageStreamEvent>; response: Response; request_id: string }> } {
     const originalModel = params.model
     // 使用免费模型
-    const model = FREE_MODELS.includes(originalModel) ? originalModel : DEFAULT_MODEL
+    const model = resolveOpencodeModel(originalModel)
     const isStream = params.stream === true
     
     // 转换消息格式

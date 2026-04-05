@@ -1863,7 +1863,7 @@ export type UserAccountInfo = {
 export function getAccountInformation() {
   const apiProvider = getAPIProvider()
   // Only provide account info for first-party Anthropic API or opencode provider
-  if (apiProvider !== 'firstParty' && apiProvider !== 'opencode') {
+  if (apiProvider !== 'firstParty'){
     return undefined
   }
   const { source: authTokenSource } = getAuthTokenSource()

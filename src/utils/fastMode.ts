@@ -112,9 +112,9 @@ export function getFastModeUnavailableReason(): string | null {
   // Only available for 1P (not Bedrock/Vertex/Foundry/Opencode)
   const provider = getAPIProvider()
   if (provider !== 'firstParty') {
-    const reason = provider === 'opencode'
-      ? 'Fast mode is not available with third-party API providers'
-      : 'Fast mode is not available on Bedrock, Vertex, or Foundry'
+    const reason = ['bedrock', 'vertex', 'foundry'].includes(provider)
+      ? 'Fast mode is not available on Bedrock, Vertex, or Foundry'
+      : 'Fast mode is not available with third-party API providers';
     logForDebugging(`Fast mode unavailable: ${reason}`)
     return reason
   }

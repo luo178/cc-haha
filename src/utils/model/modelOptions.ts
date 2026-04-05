@@ -65,7 +65,7 @@ export function getDefaultOptionForUser(fastMode = false): ModelOption {
   }
 
   // PAYG
-  const is3P = getAPIProvider() !== 'firstParty' && getAPIProvider() !== 'opencode'
+  const is3P = getAPIProvider() !== 'firstParty'
   return {
     value: null,
     label: 'Default (recommended)',
@@ -82,7 +82,7 @@ function getCustomSonnetOption(): ModelOption | undefined {
     return {
       value: 'sonnet',
       label:
-        process.env.ANTHROPIC_DEFAULT_SONNET_MODEL_NAME || 'Sonnet',
+        process.env.ANTHROPIC_DEFAULT_SONNET_MODEL_NAME ?? customSonnetModel,
       description:
         process.env.ANTHROPIC_DEFAULT_SONNET_MODEL_DESCRIPTION ??
         `Custom Sonnet model${is1m ? ' (1M context)' : ''}`,
@@ -112,7 +112,7 @@ function getCustomOpusOption(): ModelOption | undefined {
     const is1m = has1mContext(customOpusModel)
     return {
       value: 'opus',
-      label: process.env.ANTHROPIC_DEFAULT_OPUS_MODEL_NAME || 'Opus',
+      label: process.env.ANTHROPIC_DEFAULT_OPUS_MODEL_NAME ?? customOpusModel,
       description:
         process.env.ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION ??
         `Custom Opus model${is1m ? ' (1M context)' : ''}`,
@@ -141,7 +141,7 @@ function getOpus46Option(fastMode = false): ModelOption {
 }
 
 export function getSonnet46_1MOption(): ModelOption {
-  const is3P = getAPIProvider() !== 'firstParty' && getAPIProvider() !== 'opencode'
+  const is3P = getAPIProvider() !== 'firstParty'
   return {
     value: is3P ? getModelStrings().sonnet46 + '[1m]' : 'sonnet[1m]',
     label: 'Sonnet (1M context)',
@@ -169,7 +169,7 @@ function getCustomHaikuOption(): ModelOption | undefined {
   if (is3P && customHaikuModel) {
     return {
       value: 'haiku',
-      label: process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME || 'Haiku',
+      label: process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME ?? customHaikuModel,
       description:
         process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL_DESCRIPTION ??
         'Custom Haiku model',
@@ -323,8 +323,8 @@ function getModelOptionsBase(fastMode = false): ModelOption[] {
     return standardOptions
   }
 
-  // PAYG 1P API (and opencode): Default (Sonnet) + Sonnet 1M + Opus 4.6 + Opus 1M + Haiku
-  if (getAPIProvider() === 'firstParty' || getAPIProvider() === 'opencode') {
+  // PAYG 1P API: Default (Sonnet) + Sonnet 1M + Opus 4.6 + Opus 1M + Haiku
+  if (getAPIProvider() === 'firstParty') {
     const payg1POptions = [getDefaultOptionForUser(fastMode)]
     if (checkSonnet1mAccess()) {
       payg1POptions.push(getSonnet46_1MOption())
