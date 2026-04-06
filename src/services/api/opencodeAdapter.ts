@@ -25,7 +25,9 @@ const OPENCODE_BASE_URL = 'https://opencode.ai/zen/v1'
  */
 function normaliseBaseUrl(url: string): string {
   const stripped = url.replace(/\/+$/, '')
-  if (stripped.endsWith('/v1')) return stripped
+  // If the URL already ends with a versioned API path (e.g. /v1, /v2, /api/v1),
+  // preserve it — don't blindly append /v1.
+  if (/\/v\d+$/.test(stripped) || stripped.endsWith('/api/v1')) return stripped
   return `${stripped}/v1`
 }
 
@@ -104,9 +106,15 @@ export function getOpencodeHeaders(sessionId?: string, requestId?: string) {
  * to the default model.
  */
 function resolveOpencodeModel(requestedModel: string): string {
-  return (OPENCODE_FREE_MODELS as readonly string[]).includes(requestedModel)
+  const resolved = (OPENCODE_FREE_MODELS as readonly string[]).includes(requestedModel)
     ? requestedModel
     : OPENCODE_DEFAULT_MODEL
+  if (resolved !== requestedModel) {
+    logForDebugging(
+      `[API:opencode] Model "${requestedModel}" not in free list, falling back to "${resolved}"`,
+    )
+  }
+  return resolved
 }
 
 export function createOpencodeClient(): OpenAI {
@@ -173,7 +181,7 @@ function enforceAlternation(
     }
     if (result.length > 0) {
       const prev = result[result.length - 1]!
-      // Skip alternation if prev is tool role (tool→user/assistant is valid)
+      // tool→user/assistant is valid, but tool→tool is not — the guard above handles it
       if (prev.role === 'tool') {
         result.push(msg)
         continue
@@ -202,28 +210,40 @@ function enforceAlternation(
     }
     result.push(msg)
   }
+
+  // Final validation: ensure no tool→tool sequence slipped through
+  // (shouldn't happen given the guard above, but catch malformed input early)
+  for (let i = 1; i < result.length; i++) {
+    if (result[i]!.role === 'tool' && result[i - 1]!.role === 'tool') {
+      logForDebugging(
+        `[API:opencode] Warning: consecutive tool messages detected at index ${i - 1}/${i}`,
+      )
+    }
+  }
+
   return result
 }
 
 /**
  * Convert a single Anthropic message to one or more OpenAI message params.
  * Handles text, images, tool_use, tool_result, and thinking blocks.
+ *
+ * IMPORTANT: tool_result blocks are returned separately so they can be
+ * positioned after assistant tool_calls (not merged into user messages).
  */
 function convertSingleMessage(
   msg: Anthropic.Messages.MessageParam,
   systemBlocks: string[],
 ): OpenAI.Chat.ChatCompletionMessageParam[] {
-  const partial: OpenAI.Chat.ChatCompletionMessageParam[] = []
-
   // --- String content shortcut ---
   if (typeof msg.content === 'string') {
     if (msg.content.trim().length > 0) {
-      partial.push({
+      return [{
         role: mapRole(msg.role),
         content: msg.content,
-      })
+      }]
     }
-    return partial
+    return []
   }
 
   // --- Array content ---
@@ -231,15 +251,15 @@ function convertSingleMessage(
   const toolCalls: OpenAI.Chat.ChatCompletionMessageToolCall[] = []
   const imageParts: OpenAI.Chat.ChatCompletionContentPartImage[] = []
   const thinkingBlocks: OpencodeThinkingBlock[] = []
+  const toolResults: OpenAI.Chat.ChatCompletionMessageParam[] = []
 
   for (const part of msg.content) {
     if (part.type === 'text') {
-      // 过滤掉 system-reminder 内容
-      if (!part.text.includes('<system-reminder>')) {
+      const trimmed = part.text.trim()
+      if (!(/^<system-reminder>/.test(trimmed) && /<\/system-reminder>$/.test(trimmed))) {
         textParts.push(part.text)
       }
     } else if (part.type === 'image') {
-      // 处理图片内容，转换为 OpenAI 的 image_url 格式
       const imagePart = part as Anthropic.ImageBlockParam
       const source = imagePart.source
       if (source?.type === 'base64') {
@@ -261,7 +281,6 @@ function convertSingleMessage(
         })
       }
     } else if (part.type === 'tool_use') {
-      // 记录工具调用（assistant 的消息中）
       const toolPart = part as unknown as OpencodeToolBlock
       toolCalls.push({
         id: toolPart.id,
@@ -272,56 +291,67 @@ function convertSingleMessage(
         },
       })
     } else if (part.type === 'tool_result') {
-      // 工具结果需要作为单独的 message 添加（tool 角色）
       const toolResultContent =
         typeof part.content === 'string'
           ? part.content
           : JSON.stringify(part.content)
-      partial.push({
+      toolResults.push({
         role: 'tool',
         tool_call_id: part.tool_use_id,
         content: toolResultContent,
       })
     } else if ((part as any).type === 'thinking') {
-      // Collect thinking blocks — they'll be prepended as system hints
       const thinkingPart = part as unknown as OpencodeThinkingBlock
       thinkingBlocks.push(thinkingPart)
     }
   }
 
-  // Merge text content
   const content = textParts.join('\n').trim()
 
-  // If there are tool_calls, create an assistant message with tool_calls
+  // Build the message sequence in the correct order:
+  // If there are both tool_calls AND toolResults in the SAME Anthropic message,
+  // emit assistant(tool_calls) → tool(role) pairs.
+  // This handles Anthropic's pattern where a single user message may contain
+  // interleaved tool_result + text blocks (after tool results come back).
+  const result: OpenAI.Chat.ChatCompletionMessageParam[] = []
+
   if (toolCalls.length > 0) {
-    partial.push({
+    // assistant message with tool_calls
+    result.push({
       role: 'assistant',
       content: content || null,
       tool_calls: toolCalls,
     })
+    // tool results follow immediately
+    result.push(...toolResults)
+  } else if (toolResults.length > 0) {
+    // Standalone tool results (no tool_calls in this message)
+    result.push(...toolResults)
+    // Any remaining text after tool results
+    if (content.length > 0) {
+      result.push({ role: mapRole(msg.role), content })
+    }
   } else if (imageParts.length > 0) {
-    // Multi-part: images + optional text
     const contentParts: OpenAI.Chat.ChatCompletionContentPart[] = [
       ...imageParts,
       ...(content ? [{ type: 'text' as const, text: content }] : []),
     ]
-    partial.push({
+    result.push({
       role: mapRole(msg.role),
       content: contentParts,
     })
   } else if (content.length > 0) {
-    partial.push({
+    result.push({
       role: mapRole(msg.role),
-      content: content,
+      content,
     })
   }
 
-  // Thinking blocks are converted to system hints for the next turn
   for (const tb of thinkingBlocks) {
     systemBlocks.push(`[Thinking] ${tb.thinking}`)
   }
 
-  return partial
+  return result
 }
 
 /**
@@ -337,7 +367,8 @@ function convertAnthropicMessagesToOpenAI(
   const thinkingSystemHints: string[] = []
 
   for (const msg of messages) {
-    result.push(...convertSingleMessage(msg, thinkingSystemHints))
+    const converted = convertSingleMessage(msg, thinkingSystemHints)
+    result.push(...converted)
   }
 
   // Build leading system message from params.system + thinking hints
@@ -390,7 +421,7 @@ async function* convertOpenAIStreamToAnthropic(
   // to avoid index collisions (text at index 0, first tool at index 1, etc.)
   let nextBlockIndex = 0
   const toolBlockIndices: number[] = []
-  const toolCallBuffers = new Map<number, { id: string; name: string; args: string }>()
+  const toolCallBuffers = new Map<number, { id: string; name: string; args: string; blockIndex: number }>()
 
   const sendCleanupEvents = function* (stopReason: string | null) {
     if (hasTextBlock && textBlockIndex >= 0) {
@@ -476,16 +507,33 @@ async function* convertOpenAIStreamToAnthropic(
               name: initialName,
               args: initialArgs,
               blockIndex,
-            } as any)
+              started: false, // track whether content_block_start has been yielded
+            })
 
-            const toolName = initialName || 'unknown_tool'
-            yield {
-              type: 'content_block_start',
-              index: blockIndex,
-              content_block: { type: 'tool_use', id: toolId, name: toolName, input: '' },
-            } as Anthropic.Messages.RawMessageStreamEvent
+            // If we already have the name, emit content_block_start immediately.
+            // Otherwise defer it — the name will arrive in a subsequent chunk
+            // and we'll emit it then (see the else branch below).
+            if (initialName) {
+              toolCallBuffers.get(openaiIndex)!.started = true
+              yield {
+                type: 'content_block_start',
+                index: blockIndex,
+                content_block: { type: 'tool_use', id: toolId, name: initialName, input: '' },
+              } as Anthropic.Messages.RawMessageStreamEvent
+            }
 
             if (initialArgs) {
+              // Ensure content_block_start is emitted before first delta
+              const buf = toolCallBuffers.get(openaiIndex)!
+              if (!buf.started) {
+                buf.started = true
+                const nameToUse = buf.name || 'unknown_tool'
+                yield {
+                  type: 'content_block_start',
+                  index: blockIndex,
+                  content_block: { type: 'tool_use', id: toolId, name: nameToUse, input: '' },
+                } as Anthropic.Messages.RawMessageStreamEvent
+              }
               yield {
                 type: 'content_block_delta',
                 index: blockIndex,
@@ -494,12 +542,28 @@ async function* convertOpenAIStreamToAnthropic(
             }
           } else {
             const buffer = toolCallBuffers.get(openaiIndex)!
-            if (toolCall.function?.name) buffer.name = toolCall.function.name
+            if (toolCall.function?.name) {
+              buffer.name = toolCall.function.name
+            }
+            // If name arrived late and we haven't started yet, emit content_block_start now
+            if (!buffer.started && buffer.name) {
+              buffer.started = true
+              yield {
+                type: 'content_block_start',
+                index: buffer.blockIndex,
+                content_block: {
+                  type: 'tool_use',
+                  id: buffer.id,
+                  name: buffer.name,
+                  input: '',
+                },
+              } as Anthropic.Messages.RawMessageStreamEvent
+            }
             if (toolCall.function?.arguments) {
               buffer.args += toolCall.function.arguments
               yield {
                 type: 'content_block_delta',
-                index: (buffer as any).blockIndex,
+                index: buffer.blockIndex,
                 delta: { type: 'input_json_delta', partial_json: toolCall.function.arguments },
               } as Anthropic.Messages.RawMessageStreamEvent
             }
@@ -556,7 +620,7 @@ function mapFinishReason(
     case 'function_call':
       return 'tool_use' as any
     case 'content_filter':
-      return 'max_tokens' as any
+      return 'end_turn' as any
     default:
       return 'end_turn' as any
   }
@@ -640,18 +704,29 @@ export class OpencodeAdapter {
             const promptTokens = completion.usage?.prompt_tokens ?? 0
             return { input_tokens: promptTokens }
           } catch {
-            // Rough estimation: ~4 chars per token for English text
-            let totalChars = 0
+            // Heuristic token estimation with language-aware weighting:
+            // - ASCII text: ~4.5 chars/token (English-heavy)
+            // - CJK text:  ~1.5 chars/token (Chinese/Japanese/Korean)
+            // Mixed content gets a weighted average.
+            let asciiChars = 0
+            let cjkChars = 0
+            const cjkPattern = /[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]/
+
             for (const msg of params.messages) {
+              let text = ''
               if (typeof msg.content === 'string') {
-                totalChars += msg.content.length
+                text = msg.content
               } else if (Array.isArray(msg.content)) {
                 for (const part of msg.content) {
-                  if (part.type === 'text') totalChars += part.text.length
+                  if (part.type === 'text') text += part.text
                 }
               }
+              for (const ch of text) {
+                if (cjkPattern.test(ch)) cjkChars++
+                else asciiChars++
+              }
             }
-            return { input_tokens: Math.ceil(totalChars / 4) }
+            return { input_tokens: Math.ceil(asciiChars / 4.5 + cjkChars / 1.5) }
           }
         },
       }),
@@ -708,7 +783,7 @@ export class OpencodeAdapter {
         type: 'function' as const,
         function: {
           name: tool.name,
-          description: (tool as any).description,
+          description: tool.description,
           parameters: tool.input_schema ?? {},
         },
       }))
@@ -802,14 +877,14 @@ export class OpencodeAdapter {
         for (const tc of toolCalls) {
           let parsedInput: Record<string, unknown> = {}
           try {
-            parsedInput = JSON.parse((tc as any).function?.arguments || '{}')
+            parsedInput = JSON.parse(tc.function?.arguments || '{}')
           } catch {
             parsedInput = {}
           }
           contentBlocks.push({
             type: 'tool_use',
             id: tc.id,
-            name: (tc as any).function?.name ?? 'unknown',
+            name: tc.function?.name ?? 'unknown',
             input: parsedInput,
           } as unknown as Anthropic.Messages.ContentBlock)
         }
@@ -938,8 +1013,18 @@ export class OpencodeAdapter {
         [Symbol.asyncIterator]: iterable[Symbol.asyncIterator],
       })
 
+      // Also expose withResponse/asResponse on the iterable so consumers
+      // that iterate can still access the raw response metadata.
+      ;(iterable as any).withResponse = async () => ({
+        data: messageObj,
+        response: rawResponse ?? new Response(null, { status: 200 }),
+        request_id: requestId ?? randomUUID(),
+      })
+      ;(iterable as any).asResponse = async () =>
+        rawResponse ?? new Response(null, { status: 200 })
+
       return {
-        data: messageObj as unknown as AsyncIterable<Anthropic.Messages.RawMessageStreamEvent>,
+        data: messageObj as unknown as AsyncIterable<Anthropic.Messages.RawMessageStreamEvent> & { withResponse: () => Promise<{ data: Anthropic.Messages.Message; response: Response; request_id: string }>; asResponse: () => Promise<Response> },
         response: rawResponse,
         request_id: requestId,
       }
