@@ -84,7 +84,7 @@ function getOpencodeEnv() {
     apiKey: process.env[OPENCODE_ENV.API_KEY] || 'public',
     project: process.env[OPENCODE_ENV.PROJECT] ?? 'opencode',
     client: process.env[OPENCODE_ENV.CLIENT] ?? 'cli',
-    realIp: process.env[OPENCODE_ENV.REAL_IP] ?? '192.168.10.2',
+    realIp: process.env[OPENCODE_ENV.REAL_IP],
   }
 }
 
@@ -95,13 +95,16 @@ function getOpencodeEnv() {
  */
 export function getOpencodeHeaders(sessionId?: string, requestId?: string) {
   const defaultEnv = getOpencodeEnv()
-  return {
+  const headers: Record<string, string> = {
     [OPENCODE_HEADERS.PROJECT]: defaultEnv.project,
     [OPENCODE_HEADERS.CLIENT]: defaultEnv.client,
-    [OPENCODE_HEADERS.REAL_IP]: defaultEnv.realIp,
     [OPENCODE_HEADERS.SESSION]: sessionId ?? getSessionId(),
     [OPENCODE_HEADERS.REQUEST]: requestId ?? randomUUID(),
   }
+  if (defaultEnv.realIp) {
+    headers[OPENCODE_HEADERS.REAL_IP] = defaultEnv.realIp
+  }
+  return headers
 }
 
 /**
@@ -109,7 +112,10 @@ export function getOpencodeHeaders(sessionId?: string, requestId?: string) {
  * 若在免费模型列表中则原样使用，否则回退到默认模型。
  */
 function resolveOpencodeModel(requestedModel: string): string {
-  const resolved = (OPENCODE_FREE_MODELS as readonly string[]).includes(requestedModel)
+  const normalized = requestedModel.toLowerCase()
+  const resolved = (OPENCODE_FREE_MODELS as readonly string[]).some(
+    m => m.toLowerCase() === normalized,
+  )
     ? requestedModel
     : OPENCODE_DEFAULT_MODEL
   if (resolved !== requestedModel) {
@@ -150,13 +156,7 @@ type OpencodeToolBlock = {
   type: 'tool_use'
   id: string
   name: string
-  input: Record<string, unknown>
-}
-
-type OpencodeThinkingBlock = {
-  type: 'thinking'
-  thinking: string
-  signature: string
+  input: Record<string, unknown> | string
 }
 
 type ToolCallBufferEntry = {
@@ -171,9 +171,18 @@ type ToolCallBufferEntry = {
  * 将 Anthropic role 映射到最接近的 OpenAI role。
  * Anthropic: 'user' | 'assistant'
  * OpenAI:    'user' | 'assistant' | 'system' | 'developer' | 'tool'
+ *
+ * 注意：system 消息通过 params.system 单独处理，不应出现在
+ * MessageParam 中。如果意外传入，映射为 user 作为安全回退。
  */
 function mapRole(role: string): 'user' | 'assistant' {
-  return role === 'assistant' ? 'assistant' : 'user'
+  if (role === 'assistant') return 'assistant'
+  if (role === 'system') {
+    logForDebugging(
+      '[API:opencode] Unexpected system role in MessageParam — mapping to user as fallback',
+    )
+  }
+  return 'user'
 }
 
 /**
@@ -181,6 +190,9 @@ function mapRole(role: string): 'user' | 'assistant' {
  * 连续同角色消息会合并为一条。
  * 重要：'tool' 消息绝不合并，因为每条工具结果都必须保留独立
  * tool_call_id 才能正确配对。
+ *
+ * 特殊：assistant→assistant 时，若任一消息带 tool_calls，
+ * 不合并——保持独立的工具调用回合，避免下游无法区分 turn 边界。
  */
 function enforceAlternation(
   messages: OpenAI.Chat.ChatCompletionMessageParam[],
@@ -197,14 +209,32 @@ function enforceAlternation(
         continue
       }
 
-      // tool→user/assistant 是合法序列，直接透传
+      // tool 后的消息：若与 tool 来自同一条 Anthropic 消息（即
+      // _anthropicSourceIndex 相同），则映射为 assistant（因为 Anthropic
+      // 中单条 user 消息可能同时包含 tool_result + text）。
+      // 若来自不同 Anthropic 消息，则保持原角色，走后续的同角色合并
+      // 或异角色直推逻辑。
       if (prev.role === 'tool') {
-        result.push(msg)
-        continue
+        const prevSrc = (prev as any)._anthropicSourceIndex
+        const msgSrc = (msg as any)._anthropicSourceIndex
+        if (msg.role === 'user' && msgSrc !== undefined && prevSrc === msgSrc) {
+          result.push({ ...msg, role: 'assistant' as const })
+          continue
+        }
+        // 不同来源的消息，不做映射，落入后续逻辑
       }
 
-      // 同角色（user→user 或 assistant→assistant）：合并
+      // 同角色合并，但 assistant→assistant 且任一有 tool_calls 时
+      // 不合并——保持独立工具调用回合。
       if (prev.role === msg.role) {
+        const prevHasTools = 'tool_calls' in prev && (prev as any).tool_calls
+        const msgHasTools = 'tool_calls' in msg && (msg as any).tool_calls
+        if (prev.role === 'assistant' && (prevHasTools || msgHasTools)) {
+          // 不合并，保持独立 turn
+          result.push(msg)
+          continue
+        }
+
         // 合并内容：追加到上一条
         if (typeof prev.content === 'string' && typeof msg.content === 'string') {
           prev.content += `\n${msg.content}`
@@ -234,21 +264,26 @@ function enforceAlternation(
 
 /**
  * 将单条 Anthropic 消息转换为一条或多条 OpenAI message 参数。
- * 支持处理 text、image、tool_use、tool_result、thinking。
+ * 支持处理 text、image、tool_use、tool_result。
+ * thinking block 会被静默丢弃（OpenAI 兼容接口不支持推理回放）。
  *
  * 重要：tool_result 会作为独立消息返回，以便放在 assistant
  * tool_calls 之后（而不是并入 user 消息）。
+ *
+ * 返回的每条消息都带有 `_anthropicSourceIndex` 标记，
+ * 用于在 enforceAlternation 中区分"同一原始消息拆分"与"独立消息"。
  */
 function convertSingleMessage(
   msg: Anthropic.Messages.MessageParam,
-  systemBlocks: string[],
-): OpenAI.Chat.ChatCompletionMessageParam[] {
+  sourceIndex: number,
+): (OpenAI.Chat.ChatCompletionMessageParam & { _anthropicSourceIndex?: number })[] {
   // --- 字符串内容快捷路径 ---
   if (typeof msg.content === 'string') {
     if (msg.content.trim().length > 0) {
       return [{
         role: mapRole(msg.role),
         content: msg.content,
+        _anthropicSourceIndex: sourceIndex,
       }]
     }
     return []
@@ -258,7 +293,6 @@ function convertSingleMessage(
   const textParts: string[] = []
   const toolCalls: OpenAI.Chat.ChatCompletionMessageToolCall[] = []
   const imageParts: OpenAI.Chat.ChatCompletionContentPartImage[] = []
-  const thinkingBlocks: OpencodeThinkingBlock[] = []
   const toolResults: OpenAI.Chat.ChatCompletionMessageParam[] = []
 
   for (const part of msg.content) {
@@ -290,28 +324,39 @@ function convertSingleMessage(
       }
     } else if (part.type === 'tool_use') {
       const toolPart = part as unknown as OpencodeToolBlock
+      // input 可能是对象或已序列化的字符串
+      const inputStr = typeof toolPart.input === 'string'
+        ? toolPart.input
+        : JSON.stringify(toolPart.input || {})
       toolCalls.push({
         id: toolPart.id,
         type: 'function',
         function: {
           name: toolPart.name,
-          arguments: JSON.stringify(toolPart.input || {}),
+          arguments: inputStr,
         },
       })
     } else if (part.type === 'tool_result') {
-      const toolResultContent =
-        typeof part.content === 'string'
-          ? part.content
-          : JSON.stringify(part.content)
+      let toolResultContent: string
+      if (typeof part.content === 'string') {
+        toolResultContent = part.content
+      } else if (Array.isArray(part.content)) {
+        // 提取数组中的 text block，拼接为纯文本
+        toolResultContent = part.content
+          .filter((b): b is Anthropic.TextBlockParam => b.type === 'text')
+          .map(b => b.text)
+          .join('\n')
+      } else {
+        toolResultContent = JSON.stringify(part.content)
+      }
       toolResults.push({
         role: 'tool',
         tool_call_id: part.tool_use_id,
         content: toolResultContent,
       })
-    } else if ((part as any).type === 'thinking') {
-      const thinkingPart = part as unknown as OpencodeThinkingBlock
-      thinkingBlocks.push(thinkingPart)
     }
+    // thinking blocks are silently dropped — OpenAI-compatible endpoints
+    // do not support replaying Anthropic's internal reasoning.
   }
 
   const content = textParts.join('\n').trim()
@@ -319,7 +364,7 @@ function convertSingleMessage(
   // 按正确顺序构造消息：
   // 若同一条 Anthropic 消息同时包含 tool_calls 与 toolResults，
   // 输出 assistant(tool_calls) → tool(role) 序列。
-  // 这覆盖 Anthropic 中“单条 user 消息里交错 tool_result + text”的模式。
+  // 这覆盖 Anthropic 中”单条 user 消息里交错 tool_result + text”的模式。
   const result: OpenAI.Chat.ChatCompletionMessageParam[] = []
 
   if (toolCalls.length > 0) {
@@ -328,15 +373,20 @@ function convertSingleMessage(
       role: 'assistant',
       content: content || null,
       tool_calls: toolCalls,
+      _anthropicSourceIndex: sourceIndex,
     })
     // tool 结果紧随其后；逐条发出，保持与 tool_call 的对应关系
-    result.push(...toolResults)
+    for (const tr of toolResults) {
+      result.push({ ...tr, _anthropicSourceIndex: sourceIndex })
+    }
   } else if (toolResults.length > 0) {
     // 独立 tool 结果（该消息内没有 tool_calls）
-    result.push(...toolResults)
+    for (const tr of toolResults) {
+      result.push({ ...tr, _anthropicSourceIndex: sourceIndex })
+    }
     // tool 结果后的剩余文本
     if (content.length > 0) {
-      result.push({ role: mapRole(msg.role), content })
+      result.push({ role: mapRole(msg.role), content, _anthropicSourceIndex: sourceIndex })
     }
   } else if (imageParts.length > 0) {
     const contentParts: OpenAI.Chat.ChatCompletionContentPart[] = [
@@ -346,16 +396,14 @@ function convertSingleMessage(
     result.push({
       role: mapRole(msg.role),
       content: contentParts,
+      _anthropicSourceIndex: sourceIndex,
     })
   } else if (content.length > 0) {
     result.push({
       role: mapRole(msg.role),
       content,
+      _anthropicSourceIndex: sourceIndex,
     })
-  }
-
-  for (const tb of thinkingBlocks) {
-    systemBlocks.push(`[Thinking] ${tb.thinking}`)
   }
 
   return result
@@ -371,14 +419,13 @@ function convertAnthropicMessagesToOpenAI(
   systemParam?: Anthropic.MessageCreateParams['system'],
 ): OpenAI.Chat.ChatCompletionMessageParam[] {
   const result: OpenAI.Chat.ChatCompletionMessageParam[] = []
-  const thinkingSystemHints: string[] = []
 
-  for (const msg of messages) {
-    const converted = convertSingleMessage(msg, thinkingSystemHints)
+  for (let i = 0; i < messages.length; i++) {
+    const converted = convertSingleMessage(messages[i]!, i)
     result.push(...converted)
   }
 
-  // 基于 params.system + thinking 提示构建前置 system 消息
+  // 基于 params.system 构建前置 system 消息
   let systemContent = ''
   if (systemParam) {
     if (typeof systemParam === 'string') {
@@ -389,11 +436,6 @@ function convertAnthropicMessagesToOpenAI(
         .map(b => b.text)
         .join('\n')
     }
-  }
-  if (thinkingSystemHints.length > 0) {
-    systemContent = systemContent
-      ? `${systemContent}\n\n${thinkingSystemHints.join('\n\n')}`
-      : thinkingSystemHints.join('\n\n')
   }
   if (systemContent.trim()) {
     result.unshift({ role: 'system', content: systemContent.trim() })
@@ -553,6 +595,9 @@ async function* convertOpenAIStreamToAnthropic(
             }
           } else {
             const buffer = toolCallBuffers.get(openaiIndex)!
+            if (toolCall.id) {
+              buffer.id = toolCall.id
+            }
             if (toolCall.function?.name) {
               buffer.name = toolCall.function.name
             }
@@ -604,8 +649,24 @@ async function* convertOpenAIStreamToAnthropic(
     // HTTP 错误（如 502）或网络失败
     const errorMsg = error instanceof Error ? error.message : String(error)
     logForDebugging(`[API:opencode:stream] Stream error: ${errorMsg}`)
+    // 仅关闭已打开的 content block 并发送 message_stop，
+    // 不发送 message_delta（避免误导下游认为流正常结束）。
     if (hasStarted) {
-      yield* sendCleanupEvents(null)
+      if (hasTextBlock && textBlockIndex >= 0) {
+        yield {
+          type: 'content_block_stop',
+          index: textBlockIndex,
+        } as Anthropic.Messages.RawMessageStreamEvent
+      }
+      for (const entry of toolCallBuffers.values()) {
+        if (entry.started) {
+          yield {
+            type: 'content_block_stop',
+            index: entry.blockIndex,
+          } as Anthropic.Messages.RawMessageStreamEvent
+        }
+      }
+      yield { type: 'message_stop' } as Anthropic.Messages.RawMessageStreamEvent
     }
     throw error
   }
@@ -619,21 +680,19 @@ async function* convertOpenAIStreamToAnthropic(
  */
 function mapFinishReason(
   reason: NonNullable<OpenAI.Chat.Choice['finish_reason']>,
-): Anthropic.Messages.RawMessageStreamEvent extends { delta?: { stop_reason?: infer T } }
-  ? T
-  : string {
+): Anthropic.Messages.MessageStopReason {
   switch (reason) {
     case 'stop':
-      return 'end_turn' as any
+      return 'end_turn'
     case 'length':
-      return 'max_tokens' as any
+      return 'max_tokens'
     case 'tool_calls':
     case 'function_call':
-      return 'tool_use' as any
+      return 'tool_use'
     case 'content_filter':
-      return 'end_turn' as any
+      return 'end_turn'
     default:
-      return 'end_turn' as any
+      return 'end_turn'
   }
 }
 
@@ -679,6 +738,7 @@ function createChainablePromise<T>(
 type CountTokensParams = {
   model: string
   messages: Anthropic.Messages.MessageParam[]
+  system?: Anthropic.MessageCreateParams['system']
   tools?: Anthropic.Tool[]
   betas?: string[]
   thinking?: { type: string; budget_tokens?: number }
@@ -704,7 +764,7 @@ export class OpencodeAdapter {
           // 用最小请求估算；失败时回退到基于字符的粗略估算。
           try {
             const model = resolveOpencodeModel(params.model)
-            const openaiMessages = convertAnthropicMessagesToOpenAI(params.messages)
+            const openaiMessages = convertAnthropicMessagesToOpenAI(params.messages, params.system)
             const completion = await this.client.chat.completions.create({
               model,
               messages: openaiMessages,
@@ -717,10 +777,31 @@ export class OpencodeAdapter {
             // 启发式 token 估算（按语言加权）：
             // - ASCII 文本：约 4.5 字符 / token（英文占多）
             // - CJK 文本：约 1.5 字符 / token（中日韩）
+            // - 图片：base64 约 1000 tokens/张，URL 约 200 tokens/张
+            // - 工具定义：每个约 50 tokens
             // 混合内容按加权平均估算。
             let asciiChars = 0
             let cjkChars = 0
+            let imageCount = 0
+            let isBase64Image = false
             const cjkPattern = /[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]/
+
+            // 计入 system prompt 的 token 开销
+            if (params.system) {
+              let systemText = ''
+              if (typeof params.system === 'string') {
+                systemText = params.system
+              } else if (Array.isArray(params.system)) {
+                systemText = params.system
+                  .filter((b): b is Anthropic.TextBlockParam => b.type === 'text')
+                  .map(b => b.text)
+                  .join('\n')
+              }
+              for (const ch of systemText) {
+                if (cjkPattern.test(ch)) cjkChars++
+                else asciiChars++
+              }
+            }
 
             for (const msg of params.messages) {
               let text = ''
@@ -729,6 +810,11 @@ export class OpencodeAdapter {
               } else if (Array.isArray(msg.content)) {
                 for (const part of msg.content) {
                   if (part.type === 'text') text += part.text
+                  else if (part.type === 'image') {
+                    imageCount++
+                    const src = (part as Anthropic.ImageBlockParam).source
+                    if (src?.type === 'base64') isBase64Image = true
+                  }
                   else if (part.type === 'tool_use' && 'input' in part) text += JSON.stringify(part.input)
                   else if (part.type === 'tool_result' && 'content' in part) {
                     if (typeof part.content === 'string') text += part.content
@@ -745,7 +831,15 @@ export class OpencodeAdapter {
                 else asciiChars++
               }
             }
-            return { input_tokens: Math.ceil(asciiChars / 4.5 + cjkChars / 1.5) }
+
+            // 工具定义估算
+            const toolTokenEstimate = (params.tools?.length ?? 0) * 50
+            // 图片估算
+            const imageTokenEstimate = imageCount * (isBase64Image ? 1000 : 200)
+
+            return {
+              input_tokens: Math.ceil(asciiChars / 4.5 + cjkChars / 1.5) + toolTokenEstimate + imageTokenEstimate,
+            }
           }
         },
       }),
@@ -819,9 +913,13 @@ export class OpencodeAdapter {
       const requestParams: OpenAI.Chat.ChatCompletionCreateParams = {
         model,
         messages,
-        max_tokens: params.max_tokens ?? 4096,
         temperature: params.temperature ?? 0.7,
         stream: isStream,
+      }
+      // 仅在调用方显式或 Anthropic 默认有值时设置 max_tokens；
+      // 不设置时模型会使用自身的最大输出长度。
+      if (params.max_tokens) {
+        requestParams.max_tokens = params.max_tokens
       }
 
       // 若提供 tools/tool_choice，则写入请求参数
@@ -835,6 +933,16 @@ export class OpencodeAdapter {
       // 若提供 stop_sequences，则写入请求参数
       if (stop && stop.length > 0) {
         requestParams.stop = stop
+      }
+
+      // 将 Anthropic thinking 参数映射到 OpenAI 等效参数
+      if (params.thinking && params.thinking.type === 'enabled') {
+        // OpenAI reasoning_effort 无直接等价，用 max_completion_tokens
+        // 限制推理预算；reasoning_effort 作为能力提示
+        ;(requestParams as any).reasoning_effort = 'high'
+        if (params.thinking.budget_tokens) {
+          ;(requestParams as any).max_completion_tokens = params.thinking.budget_tokens
+        }
       }
 
       // 组装“请求级”OpenCode headers；request id 每次请求必须唯一。
@@ -861,20 +969,20 @@ export class OpencodeAdapter {
       let rawResponse: Response | undefined
       let requestId: string | undefined
 
-      if ('withResponse' in (openaiPromise as any) && typeof (openaiPromise as any).withResponse === 'function') {
-        const wrapped = await (openaiPromise as any).withResponse()
-        openaiResponse = wrapped.data
-        rawResponse = wrapped.response
-        requestId = wrapped.request_id
-        const debugMeta = getResponseDebugMeta(rawResponse)
-        logForDebugging(
-          `[API:opencode] Upstream response (withResponse) status=${debugMeta.status}, request_id=${requestId ?? 'n/a'}, x-request-id=${debugMeta.xRequestId}, request-id=${debugMeta.requestId}, cf-ray=${debugMeta.cfRay}`,
-        )
+      if (isStream) {
+        // 流式：SDK 返回 Stream 对象，其 response 属性可访问底层 Response
+        const stream = await openaiPromise
+        openaiResponse = stream
+        rawResponse = (stream as any).response
+        requestId = rawResponse?.headers?.get('x-request-id') ?? undefined
+        if (rawResponse) {
+          const debugMeta = getResponseDebugMeta(rawResponse)
+          logForDebugging(
+            `[API:opencode] Upstream stream response status=${debugMeta.status}, request_id=${requestId ?? 'n/a'}, x-request-id=${debugMeta.xRequestId}, request-id=${debugMeta.requestId}, cf-ray=${debugMeta.cfRay}`,
+          )
+        }
       } else {
         openaiResponse = await openaiPromise
-        logForDebugging(
-          '[API:opencode] Upstream response metadata unavailable (OpenAI SDK promise has no withResponse)',
-        )
       }
 
       if (isStream) {
@@ -924,13 +1032,13 @@ export class OpencodeAdapter {
       const outputTokens = completion.usage?.completion_tokens || 0
 
       // 构造 Message 对象（供下游同步访问）
-      const messageObj: Anthropic.Messages.Message & { _request_id?: string } = {
+      const messageObj = {
         id: completion.id,
-        type: 'message',
-        role: 'assistant',
+        type: 'message' as const,
+        role: 'assistant' as const,
         content: contentBlocks,
         model: completion.model,
-        stop_reason: stopReason as any,
+        stop_reason: stopReason,
         stop_sequence: null,
         _request_id: requestId,
         usage: {
@@ -938,98 +1046,84 @@ export class OpencodeAdapter {
           output_tokens: outputTokens,
           cache_creation_input_tokens: null,
           cache_read_input_tokens: null,
-          cache_creation: null,
-          inference_geo: null,
         },
-        container: null,
-      } as unknown as Anthropic.Messages.Message
+      } as unknown as Anthropic.Messages.Message & { _request_id?: string }
 
       // 同时让其可迭代（兼容按流式协议消费的调用方）
-      // 重要：必须遵循 Anthropic 流协议：content_block_start 的 text/input 为空，
-      // 实际内容通过 content_block_delta 下发。
-      // 调用方（claude.ts）会在 content_block_start 时将 text 重置为 ''，
-      // 并依赖后续 text_delta 填充内容。
+      // 预构建事件数组并缓存，避免重复迭代时重新生成，
+      // 同时保证与真实流式行为一致（单向、不可重复消费）。
+      const cachedEvents: Anthropic.Messages.RawMessageStreamEvent[] = []
+
+      // message_start：content 为空（与 Anthropic 真实流一致）；
+      // usage 初始为零，真实值由 message_delta 上报。
+      cachedEvents.push({
+        type: 'message_start',
+        message: {
+          ...messageObj,
+          content: [],
+          usage: { input_tokens: 0, output_tokens: 0 },
+        },
+      } as Anthropic.Messages.RawMessageStreamEvent)
+
+      // 逐个内容块按 start/delta/stop 输出
+      for (let i = 0; i < contentBlocks.length; i++) {
+        const block = contentBlocks[i]!
+        if (block.type === 'tool_use') {
+          const toolInput = (block as any).input || {}
+          cachedEvents.push({
+            type: 'content_block_start',
+            index: i,
+            content_block: {
+              type: 'tool_use',
+              id: block.id,
+              name: block.name,
+              input: '',
+            },
+          } as Anthropic.Messages.RawMessageStreamEvent)
+          const inputStr = JSON.stringify(toolInput)
+          if (inputStr) {
+            cachedEvents.push({
+              type: 'content_block_delta',
+              index: i,
+              delta: { type: 'input_json_delta', partial_json: inputStr },
+            } as Anthropic.Messages.RawMessageStreamEvent)
+          }
+          cachedEvents.push({
+            type: 'content_block_stop',
+            index: i,
+          } as Anthropic.Messages.RawMessageStreamEvent)
+        } else if (block.type === 'text') {
+          cachedEvents.push({
+            type: 'content_block_start',
+            index: i,
+            content_block: { type: 'text', text: '' },
+          } as Anthropic.Messages.RawMessageStreamEvent)
+          cachedEvents.push({
+            type: 'content_block_delta',
+            index: i,
+            delta: { type: 'text_delta', text: block.text },
+          } as Anthropic.Messages.RawMessageStreamEvent)
+          cachedEvents.push({
+            type: 'content_block_stop',
+            index: i,
+          } as Anthropic.Messages.RawMessageStreamEvent)
+        }
+      }
+
+      // message_delta：携带真实 usage（与 Anthropic 真实流一致）
+      cachedEvents.push({
+        type: 'message_delta',
+        delta: { stop_reason: stopReason, stop_sequence: null },
+        usage: { input_tokens: inputTokens, output_tokens: outputTokens },
+      } as Anthropic.Messages.RawMessageStreamEvent)
+
+      cachedEvents.push({ type: 'message_stop' } as Anthropic.Messages.RawMessageStreamEvent)
+
       const iterable: AsyncIterable<Anthropic.Messages.RawMessageStreamEvent> = {
         [Symbol.asyncIterator]: async function* () {
-          // message_start：content 为空（与 Anthropic 真实流一致）
-          yield {
-            type: 'message_start',
-            message: {
-              ...messageObj,
-              content: [],
-            },
-          } as Anthropic.Messages.RawMessageStreamEvent
-
-          // 逐个内容块按 start/delta/stop 输出
-          for (let i = 0; i < contentBlocks.length; i++) {
-            const block = contentBlocks[i]!
-            if (block.type === 'tool_use') {
-              const toolInput = (block as any).input || {}
-              // content_block_start：input 必须为空字符串
-              yield {
-                type: 'content_block_start',
-                index: i,
-                content_block: {
-                  type: 'tool_use',
-                  id: block.id,
-                  name: block.name,
-                  input: '',
-                },
-              } as Anthropic.Messages.RawMessageStreamEvent
-              // input_json_delta：一次性下发完整 JSON（非流式模拟）
-              const inputStr = JSON.stringify(toolInput)
-              if (inputStr) {
-                yield {
-                  type: 'content_block_delta',
-                  index: i,
-                  delta: {
-                    type: 'input_json_delta',
-                    partial_json: inputStr,
-                  },
-                } as Anthropic.Messages.RawMessageStreamEvent
-              }
-              yield {
-                type: 'content_block_stop',
-                index: i,
-              } as Anthropic.Messages.RawMessageStreamEvent
-            } else if (block.type === 'text') {
-              // content_block_start：text 必须为空字符串
-              yield {
-                type: 'content_block_start',
-                index: i,
-                content_block: {
-                  type: 'text',
-                  text: '',
-                },
-              } as Anthropic.Messages.RawMessageStreamEvent
-              // text_delta：一次性下发完整文本（非流式模拟）
-              yield {
-                type: 'content_block_delta',
-                index: i,
-                delta: {
-                  type: 'text_delta',
-                  text: block.text,
-                },
-              } as Anthropic.Messages.RawMessageStreamEvent
-              yield {
-                type: 'content_block_stop',
-                index: i,
-              } as Anthropic.Messages.RawMessageStreamEvent
-            }
+          for (const event of cachedEvents) {
+            yield event
           }
-
-          // message_delta
-          yield {
-            type: 'message_delta',
-            delta: {
-              stop_reason: stopReason,
-              stop_sequence: null,
-            },
-            usage: { input_tokens: inputTokens, output_tokens: outputTokens },
-          } as Anthropic.Messages.RawMessageStreamEvent
-
-          // message_stop
-          yield { type: 'message_stop' } as Anthropic.Messages.RawMessageStreamEvent
         },
       }
 
