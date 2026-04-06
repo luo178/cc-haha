@@ -1,5 +1,5 @@
 /**
- * OpenCode Adapter - 将 OpenAI-compatible API 适配为 Anthropic SDK 接口
+ * OpenCode 适配器：将 OpenAI-compatible API 适配为 Anthropic SDK 接口
  */
 
 import OpenAI from 'openai'
@@ -12,9 +12,11 @@ const OPENCODE_HOST_PATTERN = 'opencode.ai'
 const OPENCODE_BASE_URL = 'https://opencode.ai/zen/v1'
 
 /**
- * Normalise a user-supplied base URL so it always ends with exactly one `/v1`.
+ * 规范化用户提供的 base URL。
+ * 如果没有版本段则补 `/v1`；
+ * 如果已存在版本段（如 `/v2`、`/api/v1`）则保持不变。
  *
- * Handles:
+ * 示例：
  *   https://host          → https://host/v1
  *   https://host/         → https://host/v1
  *   https://host/v1       → https://host/v1
@@ -25,8 +27,8 @@ const OPENCODE_BASE_URL = 'https://opencode.ai/zen/v1'
  */
 function normaliseBaseUrl(url: string): string {
   const stripped = url.replace(/\/+$/, '')
-  // If the URL already ends with a versioned API path (e.g. /v1, /v2, /api/v1),
-  // preserve it — don't blindly append /v1.
+  // 若 URL 已以版本化路径结尾（如 /v1、/v2、/api/v1），直接保留，
+  // 避免盲目追加 /v1。
   if (/\/v\d+$/.test(stripped) || stripped.endsWith('/api/v1')) return stripped
   return `${stripped}/v1`
 }
@@ -54,56 +56,57 @@ const OPENCODE_FREE_MODELS = [
 // 默认使用 qwen3.6-plus-free
 const OPENCODE_DEFAULT_MODEL = 'qwen3.6-plus-free'
 
-/** Environment variable names used by the OpenCode provider */
+/** OpenCode 相关环境变量名 */
 const OPENCODE_ENV = {
-  /** API key for OpenCode (falls back to 'public' if not set) */
+  /** OpenCode API key（未配置时回退到 'public'） */
   API_KEY: 'OPENCODE_API_KEY',
-  /** Project identifier (falls back to 'opencode') */
+  /** 项目标识（未配置时回退到 'opencode'） */
   PROJECT: 'VITE_OPENCODE_PROJECT',
-  /** Client identifier (falls back to 'cli') */
+  /** 客户端标识（未配置时回退到 'cli'） */
   CLIENT: 'OPENCODE_CLIENT',
+  /** 客户端真实 IP */
+  REAL_IP: 'OPENCODE_REAL_IP',
 } as const
 
-/** HTTP header names used for OpenCode requests */
+/** OpenCode 请求使用的 HTTP Header 名称 */
 export const OPENCODE_HEADERS = {
+  AUTH: 'Authorization',
   PROJECT: 'x-opencode-project',
   CLIENT: 'x-opencode-client',
   SESSION: 'x-opencode-session',
   REQUEST: 'x-opencode-request',
+  REAL_IP: 'x-real-ip'
 } as const
 
-/**
- * Returns the default values for OpenCode environment variables.
- * Separated so consumers (client.ts, opencodeAdapter.ts) can read
- * the same defaults without duplication.
- */
-function getOpencodeDefaults() {
+/** 获取 OpenCode 环境变量的默认值。 */
+function getOpencodeEnv() {
   return {
     apiKey: process.env[OPENCODE_ENV.API_KEY] || 'public',
     project: process.env[OPENCODE_ENV.PROJECT] ?? 'opencode',
     client: process.env[OPENCODE_ENV.CLIENT] ?? 'cli',
+    realIp: process.env[OPENCODE_ENV.REAL_IP] ?? '192.168.10.2',
   }
 }
 
 /**
- * Builds the OpenCode-specific headers object.
- * @param sessionId - Optional session ID (falls back to getSessionId())
- * @param requestId - Optional request ID (falls back to crypto.randomUUID())
+ * 生成 OpenCode 请求头。
+ * @param sessionId 可选的会话 ID
+ * @param requestId 可选的请求 ID
  */
 export function getOpencodeHeaders(sessionId?: string, requestId?: string) {
-  const defaults = getOpencodeDefaults()
+  const defaultEnv = getOpencodeEnv()
   return {
-    [OPENCODE_HEADERS.PROJECT]: defaults.project,
-    [OPENCODE_HEADERS.CLIENT]: defaults.client,
+    [OPENCODE_HEADERS.PROJECT]: defaultEnv.project,
+    [OPENCODE_HEADERS.CLIENT]: defaultEnv.client,
+    [OPENCODE_HEADERS.REAL_IP]: defaultEnv.realIp,
     [OPENCODE_HEADERS.SESSION]: sessionId ?? getSessionId(),
     [OPENCODE_HEADERS.REQUEST]: requestId ?? randomUUID(),
   }
 }
 
 /**
- * Resolves a requested model name to the actual model to use with OpenCode.
- * If the requested model is in the free list, use it; otherwise fall back
- * to the default model.
+ * 将请求模型解析为 OpenCode 实际可用模型。
+ * 若在免费模型列表中则原样使用，否则回退到默认模型。
  */
 function resolveOpencodeModel(requestedModel: string): string {
   const resolved = (OPENCODE_FREE_MODELS as readonly string[]).includes(requestedModel)
@@ -118,27 +121,29 @@ function resolveOpencodeModel(requestedModel: string): string {
 }
 
 export function createOpencodeClient(): OpenAI {
-  const defaults = getOpencodeDefaults()
-  const sessionId = getOpencodeHeaders()['x-opencode-session']
+  const defaultEnv = getOpencodeEnv()
+  const opencodeHeaders = getOpencodeHeaders()
+  // x-opencode-request 应为“请求级”而非“客户端级”。
+  const { [OPENCODE_HEADERS.REQUEST]: _requestHeader, ...staticHeaders } = opencodeHeaders
+  const sessionId = opencodeHeaders[OPENCODE_HEADERS.SESSION]
 
   const client = new OpenAI({
-    apiKey: defaults.apiKey,
+    apiKey: defaultEnv.apiKey,
     baseURL: getOpencodeBaseUrl(),
     defaultHeaders: {
-      'Authorization': `Bearer ${defaults.apiKey}`,
-      ...getOpencodeHeaders(),
+      ...staticHeaders,
     },
   })
 
   logForDebugging(
-    `[API:opencode] Created OpenAI client for opencode - project: ${defaults.project}, session: ${sessionId}`,
+    `[API:opencode] Created OpenAI client for opencode - project: ${defaultEnv.project}, session: ${sessionId}`,
   )
 
   return client
 }
 
 // ---------------------------------------------------------------------------
-// Anthropic → OpenAI message conversion
+// Anthropic → OpenAI 消息转换
 // ---------------------------------------------------------------------------
 
 type OpencodeToolBlock = {
@@ -154,8 +159,16 @@ type OpencodeThinkingBlock = {
   signature: string
 }
 
+type ToolCallBufferEntry = {
+  id: string
+  name: string
+  args: string
+  blockIndex: number
+  started: boolean
+}
+
 /**
- * Map an Anthropic role to the closest OpenAI role.
+ * 将 Anthropic role 映射到最接近的 OpenAI role。
  * Anthropic: 'user' | 'assistant'
  * OpenAI:    'user' | 'assistant' | 'system' | 'developer' | 'tool'
  */
@@ -164,30 +177,35 @@ function mapRole(role: string): 'user' | 'assistant' {
 }
 
 /**
- * Enforce OpenAI's alternating-role rule: user/assistant/user/...
- * Consecutive messages with the same role are merged into one.
- * IMPORTANT: 'tool' role messages are NEVER merged — they must follow
- * an assistant message with tool_calls per OpenAI's API contract.
+ * 执行 OpenAI 的角色交替规则：user/assistant/user/...
+ * 连续同角色消息会合并为一条。
+ * 重要：'tool' 消息绝不合并，因为每条工具结果都必须保留独立
+ * tool_call_id 才能正确配对。
  */
 function enforceAlternation(
   messages: OpenAI.Chat.ChatCompletionMessageParam[],
 ): OpenAI.Chat.ChatCompletionMessageParam[] {
   const result: OpenAI.Chat.ChatCompletionMessageParam[] = []
   for (const msg of messages) {
-    // tool-role messages must always pass through — they have strict ordering requirements
-    if (msg.role === 'tool') {
-      result.push(msg)
-      continue
-    }
     if (result.length > 0) {
       const prev = result[result.length - 1]!
-      // tool→user/assistant is valid, but tool→tool is not — the guard above handles it
+
+      // 连续 tool 消息保持分离，确保每个 tool_call_id 不丢失。
+      // 多工具轮次里常见 tool→tool。
+      if (prev.role === 'tool' && msg.role === 'tool') {
+        result.push(msg)
+        continue
+      }
+
+      // tool→user/assistant 是合法序列，直接透传
       if (prev.role === 'tool') {
         result.push(msg)
         continue
       }
+
+      // 同角色（user→user 或 assistant→assistant）：合并
       if (prev.role === msg.role) {
-        // Merge: append content
+        // 合并内容：追加到上一条
         if (typeof prev.content === 'string' && typeof msg.content === 'string') {
           prev.content += `\n${msg.content}`
         } else if (Array.isArray(prev.content) && Array.isArray(msg.content)) {
@@ -198,7 +216,7 @@ function enforceAlternation(
         } else if (Array.isArray(prev.content) && typeof msg.content === 'string') {
           prev.content.push({ type: 'text' as const, text: msg.content })
         }
-        // Preserve tool_calls if either has them
+        // 若任一消息带 tool_calls，合并后保留
         if ('tool_calls' in msg && msg.tool_calls) {
           ;(prev as OpenAI.Chat.ChatCompletionAssistantMessageParam).tool_calls = [
             ...((prev as OpenAI.Chat.ChatCompletionAssistantMessageParam).tool_calls ?? []),
@@ -211,31 +229,21 @@ function enforceAlternation(
     result.push(msg)
   }
 
-  // Final validation: ensure no tool→tool sequence slipped through
-  // (shouldn't happen given the guard above, but catch malformed input early)
-  for (let i = 1; i < result.length; i++) {
-    if (result[i]!.role === 'tool' && result[i - 1]!.role === 'tool') {
-      logForDebugging(
-        `[API:opencode] Warning: consecutive tool messages detected at index ${i - 1}/${i}`,
-      )
-    }
-  }
-
   return result
 }
 
 /**
- * Convert a single Anthropic message to one or more OpenAI message params.
- * Handles text, images, tool_use, tool_result, and thinking blocks.
+ * 将单条 Anthropic 消息转换为一条或多条 OpenAI message 参数。
+ * 支持处理 text、image、tool_use、tool_result、thinking。
  *
- * IMPORTANT: tool_result blocks are returned separately so they can be
- * positioned after assistant tool_calls (not merged into user messages).
+ * 重要：tool_result 会作为独立消息返回，以便放在 assistant
+ * tool_calls 之后（而不是并入 user 消息）。
  */
 function convertSingleMessage(
   msg: Anthropic.Messages.MessageParam,
   systemBlocks: string[],
 ): OpenAI.Chat.ChatCompletionMessageParam[] {
-  // --- String content shortcut ---
+  // --- 字符串内容快捷路径 ---
   if (typeof msg.content === 'string') {
     if (msg.content.trim().length > 0) {
       return [{
@@ -246,7 +254,7 @@ function convertSingleMessage(
     return []
   }
 
-  // --- Array content ---
+  // --- 数组内容路径 ---
   const textParts: string[] = []
   const toolCalls: OpenAI.Chat.ChatCompletionMessageToolCall[] = []
   const imageParts: OpenAI.Chat.ChatCompletionContentPartImage[] = []
@@ -308,26 +316,25 @@ function convertSingleMessage(
 
   const content = textParts.join('\n').trim()
 
-  // Build the message sequence in the correct order:
-  // If there are both tool_calls AND toolResults in the SAME Anthropic message,
-  // emit assistant(tool_calls) → tool(role) pairs.
-  // This handles Anthropic's pattern where a single user message may contain
-  // interleaved tool_result + text blocks (after tool results come back).
+  // 按正确顺序构造消息：
+  // 若同一条 Anthropic 消息同时包含 tool_calls 与 toolResults，
+  // 输出 assistant(tool_calls) → tool(role) 序列。
+  // 这覆盖 Anthropic 中“单条 user 消息里交错 tool_result + text”的模式。
   const result: OpenAI.Chat.ChatCompletionMessageParam[] = []
 
   if (toolCalls.length > 0) {
-    // assistant message with tool_calls
+    // 带 tool_calls 的 assistant 消息
     result.push({
       role: 'assistant',
       content: content || null,
       tool_calls: toolCalls,
     })
-    // tool results follow immediately
+    // tool 结果紧随其后；逐条发出，保持与 tool_call 的对应关系
     result.push(...toolResults)
   } else if (toolResults.length > 0) {
-    // Standalone tool results (no tool_calls in this message)
+    // 独立 tool 结果（该消息内没有 tool_calls）
     result.push(...toolResults)
-    // Any remaining text after tool results
+    // tool 结果后的剩余文本
     if (content.length > 0) {
       result.push({ role: mapRole(msg.role), content })
     }
@@ -355,9 +362,9 @@ function convertSingleMessage(
 }
 
 /**
- * Convert Anthropic messages to OpenAI messages.
- * Also extracts any `params.system` content as a leading system message.
- * Enforces OpenAI's alternating-role rule.
+ * 将 Anthropic 消息数组转换为 OpenAI 消息数组。
+ * 同时抽取 `params.system` 作为首条 system 消息，
+ * 并执行 OpenAI 的角色交替规则。
  */
 function convertAnthropicMessagesToOpenAI(
   messages: Anthropic.Messages.MessageParam[],
@@ -371,7 +378,7 @@ function convertAnthropicMessagesToOpenAI(
     result.push(...converted)
   }
 
-  // Build leading system message from params.system + thinking hints
+  // 基于 params.system + thinking 提示构建前置 system 消息
   let systemContent = ''
   if (systemParam) {
     if (typeof systemParam === 'string') {
@@ -392,12 +399,12 @@ function convertAnthropicMessagesToOpenAI(
     result.unshift({ role: 'system', content: systemContent.trim() })
   }
 
-  // Enforce alternating role rule (skip the system message at index 0)
+  // 执行角色交替规则（跳过索引 0 的 system 消息）
   const systemMsg = result[0]?.role === 'system' ? result.shift() : null
   const alternated = enforceAlternation(result)
   if (systemMsg) alternated.unshift(systemMsg)
 
-  // If result is empty, throw — sending a fake 'hello' is unsafe
+  // 若转换后为空则抛错；伪造 'hello' 存在风险
   if (alternated.length === 0) {
     throw new Error(
       'No valid messages after conversion. Ensure at least one user message is provided.',
@@ -417,11 +424,10 @@ async function* convertOpenAIStreamToAnthropic(
   let hasStarted = false
   let hasTextBlock = false
   let textBlockIndex = -1
-  // Monotonically increasing block index — text and tools share this counter
-  // to avoid index collisions (text at index 0, first tool at index 1, etc.)
+  // 统一递增的内容块索引：文本与工具共享同一计数器，
+  // 避免索引冲突（如文本 0、首个工具 1）。
   let nextBlockIndex = 0
-  const toolBlockIndices: number[] = []
-  const toolCallBuffers = new Map<number, { id: string; name: string; args: string; blockIndex: number }>()
+  const toolCallBuffers = new Map<number, ToolCallBufferEntry>()
 
   const sendCleanupEvents = function* (stopReason: string | null) {
     if (hasTextBlock && textBlockIndex >= 0) {
@@ -430,8 +436,15 @@ async function* convertOpenAIStreamToAnthropic(
         index: textBlockIndex,
       } as Anthropic.Messages.RawMessageStreamEvent
     }
-    for (const idx of toolBlockIndices) {
-      yield { type: 'content_block_stop', index: idx } as Anthropic.Messages.RawMessageStreamEvent
+    for (const entry of toolCallBuffers.values()) {
+      // 仅关闭已 start 的块；否则在流提前结束时会出现
+      // 非法的 stop-before-start 序列。
+      if (entry.started) {
+        yield {
+          type: 'content_block_stop',
+          index: entry.blockIndex,
+        } as Anthropic.Messages.RawMessageStreamEvent
+      }
     }
     yield {
       type: 'message_delta',
@@ -489,7 +502,7 @@ async function* convertOpenAIStreamToAnthropic(
         } as Anthropic.Messages.RawMessageStreamEvent
       }
 
-      // Tool calls
+      // 工具调用
       const toolCalls = (delta as OpenAI.Chat.ChatCompletionChunk.Choice.Delta & { tool_calls?: Array<OpenAI.Chat.ChatCompletionChunk.Choice.Delta.ToolCall & { index?: number }> })?.tool_calls
       if (toolCalls && Array.isArray(toolCalls)) {
         logForDebugging(`[API:opencode:stream] Received tool_calls: ${JSON.stringify(toolCalls)}, delta keys: ${Object.keys(delta || {})}`)
@@ -501,18 +514,16 @@ async function* convertOpenAIStreamToAnthropic(
             const initialName = toolCall.function?.name || ''
             const initialArgs = toolCall.function?.arguments || ''
             const blockIndex = nextBlockIndex++
-            toolBlockIndices.push(blockIndex)
             toolCallBuffers.set(openaiIndex, {
               id: toolId,
               name: initialName,
               args: initialArgs,
               blockIndex,
-              started: false, // track whether content_block_start has been yielded
+              started: false, // 标记 content_block_start 是否已发出
             })
 
-            // If we already have the name, emit content_block_start immediately.
-            // Otherwise defer it — the name will arrive in a subsequent chunk
-            // and we'll emit it then (see the else branch below).
+            // 若已有工具名，立即发 content_block_start。
+            // 否则延迟到后续 chunk 拿到 name 再发（见下面 else 分支）。
             if (initialName) {
               toolCallBuffers.get(openaiIndex)!.started = true
               yield {
@@ -523,7 +534,7 @@ async function* convertOpenAIStreamToAnthropic(
             }
 
             if (initialArgs) {
-              // Ensure content_block_start is emitted before first delta
+              // 确保首个 delta 前一定先发 content_block_start
               const buf = toolCallBuffers.get(openaiIndex)!
               if (!buf.started) {
                 buf.started = true
@@ -545,7 +556,7 @@ async function* convertOpenAIStreamToAnthropic(
             if (toolCall.function?.name) {
               buffer.name = toolCall.function.name
             }
-            // If name arrived late and we haven't started yet, emit content_block_start now
+            // name 晚到且尚未 start 时，此处补发 content_block_start
             if (!buffer.started && buffer.name) {
               buffer.started = true
               yield {
@@ -571,13 +582,13 @@ async function* convertOpenAIStreamToAnthropic(
         }
       }
 
-      // Track tokens
+      // 跟踪 token 用量
       if (chunk.usage) {
         inputTokens = chunk.usage.prompt_tokens || inputTokens
         outputTokens = chunk.usage.completion_tokens || outputTokens
       }
 
-      // Finish
+      // 完成态
       if (choice?.finish_reason) {
         const stopReason = mapFinishReason(choice.finish_reason)
         yield* sendCleanupEvents(stopReason)
@@ -585,12 +596,12 @@ async function* convertOpenAIStreamToAnthropic(
       }
     }
 
-    // Stream ended without finish_reason — send cleanup anyway
+    // 流结束但未给 finish_reason，也要补发收尾事件
     if (hasStarted) {
       yield* sendCleanupEvents(null)
     }
   } catch (error) {
-    // HTTP errors (502, etc.) or network failures
+    // HTTP 错误（如 502）或网络失败
     const errorMsg = error instanceof Error ? error.message : String(error)
     logForDebugging(`[API:opencode:stream] Stream error: ${errorMsg}`)
     if (hasStarted) {
@@ -601,9 +612,9 @@ async function* convertOpenAIStreamToAnthropic(
 }
 
 /**
- * Map OpenAI finish_reason to Anthropic stop_reason.
+ * 将 OpenAI finish_reason 映射为 Anthropic stop_reason。
  *
- * OpenAI:   'stop' | 'length' | 'tool_calls' | 'content_filter' | 'function_call'
+ * OpenAI:    'stop' | 'length' | 'tool_calls' | 'content_filter' | 'function_call'
  * Anthropic: 'end_turn' | 'max_tokens' | 'tool_use' | 'stop_sequence'
  */
 function mapFinishReason(
@@ -689,9 +700,8 @@ export class OpencodeAdapter {
     this.beta = {
       messages: Object.assign(this.createMessagesProxy(), {
         countTokens: async (params: { model: string; messages: Anthropic.Messages.MessageParam[]; tools?: Anthropic.Tool[]; betas?: string[]; thinking?: { type: string; budget_tokens?: number } }) => {
-          // OpenCode doesn't expose a count-tokens endpoint, so convert messages
-          // to OpenAI format and make a minimal request to estimate tokens.
-          // Fall back to a rough character-based estimation if that fails.
+          // OpenCode 无 count-tokens 接口：先转为 OpenAI 消息，
+          // 用最小请求估算；失败时回退到基于字符的粗略估算。
           try {
             const model = resolveOpencodeModel(params.model)
             const openaiMessages = convertAnthropicMessagesToOpenAI(params.messages)
@@ -704,10 +714,10 @@ export class OpencodeAdapter {
             const promptTokens = completion.usage?.prompt_tokens ?? 0
             return { input_tokens: promptTokens }
           } catch {
-            // Heuristic token estimation with language-aware weighting:
-            // - ASCII text: ~4.5 chars/token (English-heavy)
-            // - CJK text:  ~1.5 chars/token (Chinese/Japanese/Korean)
-            // Mixed content gets a weighted average.
+            // 启发式 token 估算（按语言加权）：
+            // - ASCII 文本：约 4.5 字符 / token（英文占多）
+            // - CJK 文本：约 1.5 字符 / token（中日韩）
+            // 混合内容按加权平均估算。
             let asciiChars = 0
             let cjkChars = 0
             const cjkPattern = /[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]/
@@ -719,6 +729,15 @@ export class OpencodeAdapter {
               } else if (Array.isArray(msg.content)) {
                 for (const part of msg.content) {
                   if (part.type === 'text') text += part.text
+                  else if (part.type === 'tool_use' && 'input' in part) text += JSON.stringify(part.input)
+                  else if (part.type === 'tool_result' && 'content' in part) {
+                    if (typeof part.content === 'string') text += part.content
+                    else if (Array.isArray(part.content)) {
+                      for (const sub of part.content) {
+                        if (sub.type === 'text') text += sub.text
+                      }
+                    }
+                  }
                 }
               }
               for (const ch of text) {
@@ -733,9 +752,8 @@ export class OpencodeAdapter {
     }
     this.models = {
       list: async function* (_params?: { betas?: string[] }) {
-        // OpenCode doesn't expose a model listing endpoint.
-        // Return the known free models so that refreshModelCapabilities()
-        // has something to cache.
+        // OpenCode 无模型列表接口；
+        // 返回已知免费模型，供 refreshModelCapabilities() 缓存。
         for (const modelId of OPENCODE_FREE_MODELS) {
           yield {
             id: modelId,
@@ -762,10 +780,10 @@ export class OpencodeAdapter {
     options?: { signal?: AbortSignal; headers?: Record<string, string> },
   ): Promise<
     AsyncIterable<Anthropic.Messages.RawMessageStreamEvent> & {
-      usage: { input_tokens: number; output_tokens: number; cache_read_input_tokens: number | null; cache_creation_input_tokens: number | null }
+      usage?: { input_tokens: number; output_tokens: number; cache_read_input_tokens: number | null; cache_creation_input_tokens: number | null }
     }
   > & {
-    withResponse: () => Promise<{ data: AsyncIterable<Anthropic.Messages.RawMessageStreamEvent> & { usage: { input_tokens: number; output_tokens: number } }; response: Response; request_id: string }>
+    withResponse: () => Promise<{ data: AsyncIterable<Anthropic.Messages.RawMessageStreamEvent> & { usage?: { input_tokens: number; output_tokens: number } }; response: Response; request_id: string }>
     asResponse: () => Promise<Response>
   } {
     const originalModel = params.model
@@ -776,7 +794,7 @@ export class OpencodeAdapter {
     // 转换消息格式（含 system 参数处理）
     const messages = convertAnthropicMessagesToOpenAI(params.messages, params.system)
 
-    // Convert tools from Anthropic format to OpenAI format
+    // 将工具定义从 Anthropic 格式转换为 OpenAI 格式
     const tools = params.tools
       ?.filter((tool): tool is Anthropic.Tool => 'name' in tool && 'input_schema' in tool)
       .map((tool) => ({
@@ -788,10 +806,10 @@ export class OpencodeAdapter {
         },
       }))
 
-    // Map tool_choice from Anthropic to OpenAI format
+    // 将 tool_choice 从 Anthropic 映射到 OpenAI 格式
     const toolChoice = mapToolChoice(params.tool_choice)
 
-    // Map stop_sequences from Anthropic to OpenAI
+    // 将 stop_sequences 从 Anthropic 映射到 OpenAI
     const stop = params.stop_sequences ?? undefined
 
     logForDebugging(`[API:opencode] Original model: ${originalModel}, Using free model: ${model}, stream: ${isStream}, messages: ${messages.length}, tools: ${tools?.length || 0}`)
@@ -801,12 +819,12 @@ export class OpencodeAdapter {
       const requestParams: OpenAI.Chat.ChatCompletionCreateParams = {
         model,
         messages,
-        max_tokens: params.max_tokens || 4096,
+        max_tokens: params.max_tokens ?? 4096,
         temperature: params.temperature ?? 0.7,
         stream: isStream,
       }
 
-      // Add tools and tool_choice if provided
+      // 若提供 tools/tool_choice，则写入请求参数
       if (tools && tools.length > 0) {
         requestParams.tools = tools
         if (toolChoice) {
@@ -814,18 +832,24 @@ export class OpencodeAdapter {
         }
       }
 
-      // Add stop sequences if provided
+      // 若提供 stop_sequences，则写入请求参数
       if (stop && stop.length > 0) {
         requestParams.stop = stop
       }
 
-      // Build RequestOptions for signal/headers (second argument to create)
+      // 组装“请求级”OpenCode headers；request id 每次请求必须唯一。
+      const requestHeaders = {
+        ...getOpencodeHeaders(undefined, randomUUID()),
+        ...(options?.headers ?? {}),
+      }
+
+      // 构造 create 的第二参数：RequestOptions（signal/headers）
       const hasSignal = !!options?.signal
-      const hasHeaders = !!options?.headers
+      const hasHeaders = Object.keys(requestHeaders).length > 0
       const requestOptions = (hasSignal || hasHeaders)
         ? {
             signal: options?.signal,
-            headers: options?.headers,
+            headers: requestHeaders,
           }
         : undefined
 
@@ -861,8 +885,8 @@ export class OpencodeAdapter {
         }
       }
 
-      // 非流式响应处理 — 返回一个既是 Message 又是 AsyncIterable 的 hybrid 对象
-      // 下游代码可能同步访问 response.usage，也可能迭代事件流
+      // 非流式响应处理：返回既可当 Message 用，也可迭代事件流的 hybrid 对象
+      // 下游既可能同步读取 response.usage，也可能按流式协议消费事件
       const completion = openaiResponse as OpenAI.Chat.ChatCompletion
       const choice = completion.choices[0]
       const content = choice?.message?.content || ''
@@ -871,7 +895,7 @@ export class OpencodeAdapter {
         ? mapFinishReason(choice.finish_reason)
         : null
 
-      // Build content blocks matching Anthropic's Message.content shape
+      // 构造与 Anthropic Message.content 形状一致的 content blocks
       const contentBlocks: Anthropic.Messages.ContentBlock[] = []
       if (toolCalls && toolCalls.length > 0) {
         for (const tc of toolCalls) {
@@ -899,8 +923,8 @@ export class OpencodeAdapter {
       const inputTokens = completion.usage?.prompt_tokens || 0
       const outputTokens = completion.usage?.completion_tokens || 0
 
-      // Build the Message object — this is what downstream code accesses synchronously
-      const messageObj: Anthropic.Messages.Message = {
+      // 构造 Message 对象（供下游同步访问）
+      const messageObj: Anthropic.Messages.Message & { _request_id?: string } = {
         id: completion.id,
         type: 'message',
         role: 'assistant',
@@ -908,6 +932,7 @@ export class OpencodeAdapter {
         model: completion.model,
         stop_reason: stopReason as any,
         stop_sequence: null,
+        _request_id: requestId,
         usage: {
           input_tokens: inputTokens,
           output_tokens: outputTokens,
@@ -919,14 +944,14 @@ export class OpencodeAdapter {
         container: null,
       } as unknown as Anthropic.Messages.Message
 
-      // Make it also iterable (for stream-compatible consumers)
-      // IMPORTANT: must follow Anthropic's stream protocol where content_block_start
-      // has EMPTY text/input, and content_block_delta delivers the actual content.
-      // The consumer (claude.ts) resets text to '' on content_block_start (line ~2027)
-      // and expects text_delta to fill it.
+      // 同时让其可迭代（兼容按流式协议消费的调用方）
+      // 重要：必须遵循 Anthropic 流协议：content_block_start 的 text/input 为空，
+      // 实际内容通过 content_block_delta 下发。
+      // 调用方（claude.ts）会在 content_block_start 时将 text 重置为 ''，
+      // 并依赖后续 text_delta 填充内容。
       const iterable: AsyncIterable<Anthropic.Messages.RawMessageStreamEvent> = {
         [Symbol.asyncIterator]: async function* () {
-          // message_start — content is EMPTY (matching Anthropic's real stream)
+          // message_start：content 为空（与 Anthropic 真实流一致）
           yield {
             type: 'message_start',
             message: {
@@ -935,12 +960,12 @@ export class OpencodeAdapter {
             },
           } as Anthropic.Messages.RawMessageStreamEvent
 
-          // Deliver each content block via start/delta/stop
+          // 逐个内容块按 start/delta/stop 输出
           for (let i = 0; i < contentBlocks.length; i++) {
             const block = contentBlocks[i]!
             if (block.type === 'tool_use') {
               const toolInput = (block as any).input || {}
-              // content_block_start — input MUST be empty string
+              // content_block_start：input 必须为空字符串
               yield {
                 type: 'content_block_start',
                 index: i,
@@ -951,7 +976,7 @@ export class OpencodeAdapter {
                   input: '',
                 },
               } as Anthropic.Messages.RawMessageStreamEvent
-              // input_json_delta — full JSON at once (non-streaming emulation)
+              // input_json_delta：一次性下发完整 JSON（非流式模拟）
               const inputStr = JSON.stringify(toolInput)
               if (inputStr) {
                 yield {
@@ -968,7 +993,7 @@ export class OpencodeAdapter {
                 index: i,
               } as Anthropic.Messages.RawMessageStreamEvent
             } else if (block.type === 'text') {
-              // content_block_start — text MUST be empty string
+              // content_block_start：text 必须为空字符串
               yield {
                 type: 'content_block_start',
                 index: i,
@@ -977,7 +1002,7 @@ export class OpencodeAdapter {
                   text: '',
                 },
               } as Anthropic.Messages.RawMessageStreamEvent
-              // text_delta — full text at once (non-streaming emulation)
+              // text_delta：一次性下发完整文本（非流式模拟）
               yield {
                 type: 'content_block_delta',
                 index: i,
@@ -1008,20 +1033,17 @@ export class OpencodeAdapter {
         },
       }
 
-      // Hybrid object: acts as both Message (for sync access) and AsyncIterable (for streaming)
+      // Hybrid 对象：既可同步当 Message 用，也可按流式迭代
       Object.assign(messageObj, {
         [Symbol.asyncIterator]: iterable[Symbol.asyncIterator],
+        withResponse: async () => ({
+          data: messageObj,
+          response: rawResponse ?? new Response(null, { status: 200 }),
+          request_id: requestId ?? randomUUID(),
+        }),
+        asResponse: async () =>
+          rawResponse ?? new Response(null, { status: 200 }),
       })
-
-      // Also expose withResponse/asResponse on the iterable so consumers
-      // that iterate can still access the raw response metadata.
-      ;(iterable as any).withResponse = async () => ({
-        data: messageObj,
-        response: rawResponse ?? new Response(null, { status: 200 }),
-        request_id: requestId ?? randomUUID(),
-      })
-      ;(iterable as any).asResponse = async () =>
-        rawResponse ?? new Response(null, { status: 200 })
 
       return {
         data: messageObj as unknown as AsyncIterable<Anthropic.Messages.RawMessageStreamEvent> & { withResponse: () => Promise<{ data: Anthropic.Messages.Message; response: Response; request_id: string }>; asResponse: () => Promise<Response> },
@@ -1035,10 +1057,15 @@ export class OpencodeAdapter {
 }
 
 /**
- * Map Anthropic tool_choice to OpenAI tool_choice format.
+ * 将 Anthropic tool_choice 映射为 OpenAI tool_choice。
  *
- * Anthropic: 'auto' | 'any' | 'tool' | { type: 'tool', name: string }
- * OpenAI:    'auto' | 'none' | 'required' | { type: 'function', function: { name: string } }
+ * Anthropic：
+ *   - 'auto' | 'any' | 'tool'
+ *   - { type: 'auto' | 'any', disable_parallel_tool_use?: boolean }
+ *   - { type: 'tool', name: string, disable_parallel_tool_use?: boolean }
+ *
+ * 说明：disable_parallel_tool_use 在 OpenAI 中无直接等价字段。
+ * OpenAI: 'auto' | 'none' | 'required' | { type: 'function', function: { name: string } }
  */
 function mapToolChoice(
   toolChoice: Anthropic.MessageCreateParams['tool_choice'],
@@ -1058,11 +1085,21 @@ function mapToolChoice(
     }
   }
 
-  // { type: 'tool', name: string }
-  if (toolChoice.type === 'tool' && toolChoice.name) {
-    return {
-      type: 'function',
-      function: { name: toolChoice.name },
+  // 对象形态：{ type: 'auto' | 'any' | 'tool', ... }
+  if (typeof toolChoice === 'object' && 'type' in toolChoice) {
+    if ('disable_parallel_tool_use' in toolChoice && toolChoice.disable_parallel_tool_use) {
+      logForDebugging(
+        '[API:opencode] tool_choice.disable_parallel_tool_use is not supported by OpenAI tool_choice and will be ignored',
+      )
+    }
+
+    if (toolChoice.type === 'auto') return 'auto'
+    if (toolChoice.type === 'any') return 'required'
+    if (toolChoice.type === 'tool' && 'name' in toolChoice && toolChoice.name) {
+      return {
+        type: 'function',
+        function: { name: toolChoice.name },
+      }
     }
   }
 
