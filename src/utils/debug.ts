@@ -221,9 +221,7 @@ export function logForDebugging(
   const output = `${timestamp} [${level.toUpperCase()}] ${message.trim()}\n`
   if (isDebugToStdErr()) {
     writeToStderr(output)
-    return
   }
-
   getDebugWriter().write(output)
 }
 
