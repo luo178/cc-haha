@@ -709,6 +709,40 @@ function getResponseDebugMeta(response?: Response) {
   }
 }
 
+function truncateForDebug(value: string, maxLength = 800): string {
+  if (value.length <= maxLength) {
+    return value
+  }
+  return `${value.slice(0, maxLength)}... [truncated ${value.length - maxLength} chars]`
+}
+
+function getErrorHeader(responseLike: unknown, key: string): string {
+  const headers = (responseLike as { headers?: Headers } | null | undefined)?.headers
+  return headers?.get(key) ?? 'n/a'
+}
+
+function getErrorRequestId(error: unknown): string {
+  const candidate = error as
+    | { request_id?: string; requestID?: string }
+    | undefined
+  return candidate?.request_id ?? candidate?.requestID ?? 'n/a'
+}
+
+function getErrorBodySummary(error: unknown): string {
+  const body = (error as { error?: unknown } | null | undefined)?.error
+  if (body === undefined || body === null) {
+    return 'none'
+  }
+
+  try {
+    return truncateForDebug(
+      typeof body === 'string' ? body : JSON.stringify(body),
+    )
+  } catch {
+    return truncateForDebug(String(body))
+  }
+}
+
 function createChainablePromise<T>(
   promiseFn: () => Promise<{ data: T; response?: Response; request_id?: string }>,
 ): Promise<T> & {
@@ -969,20 +1003,28 @@ export class OpencodeAdapter {
       let rawResponse: Response | undefined
       let requestId: string | undefined
 
-      if (isStream) {
-        // 流式：SDK 返回 Stream 对象，其 response 属性可访问底层 Response
-        const stream = await openaiPromise
-        openaiResponse = stream
-        rawResponse = (stream as any).response
-        requestId = rawResponse?.headers?.get('x-request-id') ?? undefined
-        if (rawResponse) {
-          const debugMeta = getResponseDebugMeta(rawResponse)
-          logForDebugging(
-            `[API:opencode] Upstream stream response status=${debugMeta.status}, request_id=${requestId ?? 'n/a'}, x-request-id=${debugMeta.xRequestId}, request-id=${debugMeta.requestId}, cf-ray=${debugMeta.cfRay}`,
-          )
+      try {
+        if (isStream) {
+          // 流式：SDK 返回 Stream 对象，其 response 属性可访问底层 Response
+          const stream = await openaiPromise
+          openaiResponse = stream
+          rawResponse = (stream as any).response
+          requestId = rawResponse?.headers?.get('x-request-id') ?? undefined
+          if (rawResponse) {
+            const debugMeta = getResponseDebugMeta(rawResponse)
+            logForDebugging(
+              `[API:opencode] Upstream stream response status=${debugMeta.status}, request_id=${requestId ?? 'n/a'}, x-request-id=${debugMeta.xRequestId}, request-id=${debugMeta.requestId}, cf-ray=${debugMeta.cfRay}`,
+            )
+          }
+        } else {
+          openaiResponse = await openaiPromise
         }
-      } else {
-        openaiResponse = await openaiPromise
+      } catch (error) {
+        logForDebugging(
+          `[API:opencode] Request failed: model=${model}, stream=${isStream}, request_header=${requestHeaders[OPENCODE_HEADERS.REQUEST] ?? 'n/a'}, session=${requestHeaders[OPENCODE_HEADERS.SESSION] ?? 'n/a'}, project=${requestHeaders[OPENCODE_HEADERS.PROJECT] ?? 'n/a'}, status=${String((error as { status?: number | string } | undefined)?.status ?? 'unknown')}, request_id=${getErrorRequestId(error)}, x-request-id=${getErrorHeader(error, 'x-request-id')}, request-id=${getErrorHeader(error, 'request-id')}, cf-ray=${getErrorHeader(error, 'cf-ray')}, retry-after=${getErrorHeader(error, 'retry-after')}, message=${truncateForDebug((error as Error)?.message ?? String(error))}, body=${getErrorBodySummary(error)}`,
+          { level: 'error' },
+        )
+        throw error
       }
 
       if (isStream) {
