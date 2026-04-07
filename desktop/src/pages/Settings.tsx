@@ -207,6 +207,42 @@ function ProviderFormModal({ open, onClose, mode, provider }: ProviderFormProps)
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [testResult, setTestResult] = useState<ProviderTestResult | null>(null)
   const [isTesting, setIsTesting] = useState(false)
+  const [settingsJson, setSettingsJson] = useState('')
+  const [settingsJsonError, setSettingsJsonError] = useState<string | null>(null)
+
+  // Load current settings.json and merge provider env
+  useEffect(() => {
+    import('../api/settings').then(({ settingsApi }) => {
+      settingsApi.getUser().then((settings) => {
+        const merged = {
+          ...settings,
+          env: {
+            ...((settings.env as Record<string, string>) || {}),
+            ANTHROPIC_BASE_URL: baseUrl,
+            ANTHROPIC_AUTH_TOKEN: apiKey || '(your API key)',
+            ANTHROPIC_MODEL: models.main,
+            ANTHROPIC_DEFAULT_HAIKU_MODEL: models.haiku,
+            ANTHROPIC_DEFAULT_SONNET_MODEL: models.sonnet,
+            ANTHROPIC_DEFAULT_OPUS_MODEL: models.opus,
+          },
+        }
+        setSettingsJson(JSON.stringify(merged, null, 2))
+      }).catch(() => {
+        const fallback = {
+          env: {
+            ANTHROPIC_BASE_URL: baseUrl,
+            ANTHROPIC_AUTH_TOKEN: apiKey || '(your API key)',
+            ANTHROPIC_MODEL: models.main,
+            ANTHROPIC_DEFAULT_HAIKU_MODEL: models.haiku,
+            ANTHROPIC_DEFAULT_SONNET_MODEL: models.sonnet,
+            ANTHROPIC_DEFAULT_OPUS_MODEL: models.opus,
+          },
+        }
+        setSettingsJson(JSON.stringify(fallback, null, 2))
+      })
+    })
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   const handlePresetChange = (preset: typeof initialPreset) => {
     setSelectedPreset(preset)
@@ -218,7 +254,7 @@ function ProviderFormModal({ open, onClose, mode, provider }: ProviderFormProps)
 
   const isCustom = selectedPreset.id === 'custom'
   const isOfficial = selectedPreset.id === 'official'
-  const canSubmit = isOfficial || (name.trim() && baseUrl.trim() && (mode === 'edit' || apiKey.trim()) && models.main.trim())
+  const canSubmit = isOfficial || (name.trim() && baseUrl.trim() && (mode === 'edit' || apiKey.trim()) && models.main.trim() && !settingsJsonError)
 
   const handleSubmit = async () => {
     if (!canSubmit) return
@@ -230,6 +266,17 @@ function ProviderFormModal({ open, onClose, mode, provider }: ProviderFormProps)
         onClose()
         return
       }
+      // Write the edited settings.json directly
+      if (settingsJson.trim()) {
+        try {
+          const parsed = JSON.parse(settingsJson)
+          const { settingsApi } = await import('../api/settings')
+          await settingsApi.updateUser(parsed)
+        } catch {
+          // JSON validation already prevents this
+        }
+      }
+
       if (mode === 'create') {
         await createProvider({
           presetId: selectedPreset.id,
@@ -248,8 +295,8 @@ function ProviderFormModal({ open, onClose, mode, provider }: ProviderFormProps)
         }
         if (apiKey.trim()) input.apiKey = apiKey.trim()
         await updateProvider(provider.id, input)
-        if (useProviderStore.getState().activeId === provider.id) await fetchSettings()
       }
+      await fetchSettings()
       onClose()
     } catch (err) {
       console.error('Failed to save provider:', err)
@@ -371,22 +418,33 @@ function ProviderFormModal({ open, onClose, mode, provider }: ProviderFormProps)
               )}
             </div>
 
-            {/* Settings JSON Preview */}
+            {/* Settings JSON — editable */}
             <div>
-              <label className="text-sm font-medium text-[var(--color-text-primary)] mb-2 block">Settings JSON Preview</label>
-              <pre className="text-xs text-[var(--color-text-secondary)] px-3 py-3 rounded-[var(--radius-md)] bg-[var(--color-surface-container-low)] border border-[var(--color-border)] overflow-x-auto font-mono leading-relaxed">
-{JSON.stringify({
-  env: {
-    ANTHROPIC_BASE_URL: baseUrl || '...',
-    ANTHROPIC_AUTH_TOKEN: apiKey ? '***' : '(your API key)',
-    ANTHROPIC_MODEL: models.main || '...',
-    ANTHROPIC_DEFAULT_HAIKU_MODEL: models.haiku || '...',
-    ANTHROPIC_DEFAULT_SONNET_MODEL: models.sonnet || '...',
-    ANTHROPIC_DEFAULT_OPUS_MODEL: models.opus || '...',
-  },
-}, null, 2)}
-              </pre>
-              <p className="text-[11px] text-[var(--color-text-tertiary)] mt-1">Will be written to ~/.claude/settings.json on activation.</p>
+              <label className="text-sm font-medium text-[var(--color-text-primary)] mb-2 block">Settings JSON</label>
+              <textarea
+                value={settingsJson}
+                onChange={(e) => {
+                  setSettingsJson(e.target.value)
+                  // Validate JSON on change
+                  try {
+                    JSON.parse(e.target.value)
+                    setSettingsJsonError(null)
+                  } catch (err) {
+                    setSettingsJsonError(err instanceof Error ? err.message : 'Invalid JSON')
+                  }
+                }}
+                rows={16}
+                spellCheck={false}
+                className={`w-full text-xs px-3 py-3 rounded-[var(--radius-md)] bg-[var(--color-surface-container-low)] border font-mono leading-relaxed resize-y text-[var(--color-text-secondary)] outline-none ${
+                  settingsJsonError
+                    ? 'border-[var(--color-error)] focus:border-[var(--color-error)]'
+                    : 'border-[var(--color-border)] focus:border-[var(--color-border-focus)]'
+                }`}
+              />
+              {settingsJsonError && (
+                <p className="text-[11px] text-[var(--color-error)] mt-1">JSON syntax error: {settingsJsonError}</p>
+              )}
+              <p className="text-[11px] text-[var(--color-text-tertiary)] mt-1">Full ~/.claude/settings.json content. Edit directly — will be written on save.</p>
             </div>
           </>
         )}
