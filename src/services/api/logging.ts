@@ -53,54 +53,6 @@ function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-function truncateForDebug(value: string, maxLength = 800): string {
-  if (value.length <= maxLength) {
-    return value
-  }
-  return `${value.slice(0, maxLength)}... [truncated ${value.length - maxLength} chars]`
-}
-
-function getApiErrorHeaderSummary(headers?: globalThis.Headers): string {
-  if (!headers) {
-    return 'none'
-  }
-
-  const keys = [
-    'retry-after',
-    'x-request-id',
-    'request-id',
-    'cf-ray',
-    'anthropic-ratelimit-requests-reset',
-    'anthropic-ratelimit-tokens-reset',
-    'anthropic-ratelimit-input-tokens-reset',
-    'anthropic-ratelimit-output-tokens-reset',
-  ]
-
-  const parts = keys
-    .map(key => {
-      const value = headers.get(key)
-      return value ? `${key}=${value}` : null
-    })
-    .filter((part): part is string => part !== null)
-
-  return parts.length > 0 ? parts.join(', ') : 'none'
-}
-
-function getApiErrorBodySummary(error: APIError): string {
-  if (error.error === undefined || error.error === null) {
-    return 'none'
-  }
-
-  try {
-    if (typeof error.error === 'string') {
-      return truncateForDebug(error.error)
-    }
-    return truncateForDebug(jsonStringify(error.error))
-  } catch {
-    return truncateForDebug(String(error.error))
-  }
-}
-
 type KnownGateway =
   | 'litellm'
   | 'helicone'
@@ -344,13 +296,6 @@ export function logAPIError({
   if (clientRequestId) {
     logForDebugging(
       `API error x-client-request-id=${clientRequestId} (give this to the API team for server-log lookup)`,
-      { level: 'error' },
-    )
-  }
-
-  if (error instanceof APIError) {
-    logForDebugging(
-      `API error details: provider=${getAPIProviderForStatsig()}, status=${error.status}, requestID=${error.requestID ?? 'n/a'}, headers={${getApiErrorHeaderSummary(error.headers)}}, body=${getApiErrorBodySummary(error)}`,
       { level: 'error' },
     )
   }

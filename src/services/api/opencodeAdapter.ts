@@ -7,9 +7,11 @@ import type Anthropic from '@anthropic-ai/sdk'
 import { getSessionId } from '../../bootstrap/state.js'
 import { logForDebugging } from '../../utils/debug.js'
 import { randomUUID } from '../../utils/crypto.js'
+import { isEnvTruthy } from '../../utils/envUtils.js'
 
 const OPENCODE_HOST_PATTERN = 'opencode.ai'
 const OPENCODE_BASE_URL = 'https://opencode.ai/zen/v1'
+const OPENCODE_DEBUG_PAYLOADS_ENV = 'OPENCODE_DEBUG_PAYLOADS'
 
 /**
  * 规范化用户提供的 base URL。
@@ -470,34 +472,49 @@ async function* convertOpenAIStreamToAnthropic(
   // 避免索引冲突（如文本 0、首个工具 1）。
   let nextBlockIndex = 0
   const toolCallBuffers = new Map<number, ToolCallBufferEntry>()
+  const payloadLoggingEnabled = isOpencodePayloadLoggingEnabled()
+
+  const emitEvent = function* (
+    event: Anthropic.Messages.RawMessageStreamEvent,
+  ) {
+    if (payloadLoggingEnabled) {
+      logOpencodePayload('anthropic.stream_event', event)
+    }
+    yield event
+  }
 
   const sendCleanupEvents = function* (stopReason: string | null) {
     if (hasTextBlock && textBlockIndex >= 0) {
-      yield {
+      yield* emitEvent({
         type: 'content_block_stop',
         index: textBlockIndex,
-      } as Anthropic.Messages.RawMessageStreamEvent
+      } as Anthropic.Messages.RawMessageStreamEvent)
     }
     for (const entry of toolCallBuffers.values()) {
       // 仅关闭已 start 的块；否则在流提前结束时会出现
       // 非法的 stop-before-start 序列。
       if (entry.started) {
-        yield {
+        yield* emitEvent({
           type: 'content_block_stop',
           index: entry.blockIndex,
-        } as Anthropic.Messages.RawMessageStreamEvent
+        } as Anthropic.Messages.RawMessageStreamEvent)
       }
     }
-    yield {
+    yield* emitEvent({
       type: 'message_delta',
       delta: { stop_reason: stopReason, stop_sequence: null },
       usage: { input_tokens: inputTokens, output_tokens: outputTokens },
-    } as Anthropic.Messages.RawMessageStreamEvent
-    yield { type: 'message_stop' } as Anthropic.Messages.RawMessageStreamEvent
+    } as Anthropic.Messages.RawMessageStreamEvent)
+    yield* emitEvent({
+      type: 'message_stop',
+    } as Anthropic.Messages.RawMessageStreamEvent)
   }
 
   try {
     for await (const chunk of stream) {
+      if (payloadLoggingEnabled) {
+        logOpencodePayload('openai.stream_chunk', chunk)
+      }
       if (!chunk || !chunk.choices || chunk.choices.length === 0) {
         continue
       }
@@ -510,7 +527,7 @@ async function* convertOpenAIStreamToAnthropic(
         messageId = chunk.id || randomUUID()
         inputTokens = chunk.usage?.prompt_tokens || 0
         outputTokens = chunk.usage?.completion_tokens || 0
-        yield {
+        yield* emitEvent({
           type: 'message_start',
           message: {
             id: messageId,
@@ -522,7 +539,7 @@ async function* convertOpenAIStreamToAnthropic(
             stop_sequence: null,
             usage: { input_tokens: inputTokens, output_tokens: outputTokens },
           },
-        } as Anthropic.Messages.RawMessageStreamEvent
+        } as Anthropic.Messages.RawMessageStreamEvent)
       }
 
       const textContent = (delta as OpenAI.Chat.ChatCompletionChunk.Choice.Delta & { content?: string })?.content
@@ -530,24 +547,29 @@ async function* convertOpenAIStreamToAnthropic(
         if (!hasTextBlock) {
           hasTextBlock = true
           textBlockIndex = nextBlockIndex
-          yield {
+          yield* emitEvent({
             type: 'content_block_start',
             index: textBlockIndex,
             content_block: { type: 'text', text: '' },
-          } as Anthropic.Messages.RawMessageStreamEvent
+          } as Anthropic.Messages.RawMessageStreamEvent)
           nextBlockIndex++
         }
-        yield {
+        yield* emitEvent({
           type: 'content_block_delta',
           index: textBlockIndex,
           delta: { type: 'text_delta', text: textContent },
-        } as Anthropic.Messages.RawMessageStreamEvent
+        } as Anthropic.Messages.RawMessageStreamEvent)
       }
 
       // 工具调用
       const toolCalls = (delta as OpenAI.Chat.ChatCompletionChunk.Choice.Delta & { tool_calls?: Array<OpenAI.Chat.ChatCompletionChunk.Choice.Delta.ToolCall & { index?: number }> })?.tool_calls
       if (toolCalls && Array.isArray(toolCalls)) {
-        logForDebugging(`[API:opencode:stream] Received tool_calls: ${JSON.stringify(toolCalls)}, delta keys: ${Object.keys(delta || {})}`)
+        if (payloadLoggingEnabled) {
+          logOpencodePayload('openai.stream_tool_calls', {
+            tool_calls: toolCalls,
+            delta,
+          })
+        }
         for (const toolCall of toolCalls) {
           const openaiIndex = toolCall.index ?? 0
           const toolId = toolCall.id || `tool_${openaiIndex}`
@@ -568,11 +590,11 @@ async function* convertOpenAIStreamToAnthropic(
             // 否则延迟到后续 chunk 拿到 name 再发（见下面 else 分支）。
             if (initialName) {
               toolCallBuffers.get(openaiIndex)!.started = true
-              yield {
+              yield* emitEvent({
                 type: 'content_block_start',
                 index: blockIndex,
                 content_block: { type: 'tool_use', id: toolId, name: initialName, input: '' },
-              } as Anthropic.Messages.RawMessageStreamEvent
+              } as Anthropic.Messages.RawMessageStreamEvent)
             }
 
             if (initialArgs) {
@@ -581,17 +603,17 @@ async function* convertOpenAIStreamToAnthropic(
               if (!buf.started) {
                 buf.started = true
                 const nameToUse = buf.name || 'unknown_tool'
-                yield {
+                yield* emitEvent({
                   type: 'content_block_start',
                   index: blockIndex,
                   content_block: { type: 'tool_use', id: toolId, name: nameToUse, input: '' },
-                } as Anthropic.Messages.RawMessageStreamEvent
+                } as Anthropic.Messages.RawMessageStreamEvent)
               }
-              yield {
+              yield* emitEvent({
                 type: 'content_block_delta',
                 index: blockIndex,
                 delta: { type: 'input_json_delta', partial_json: initialArgs },
-              } as Anthropic.Messages.RawMessageStreamEvent
+              } as Anthropic.Messages.RawMessageStreamEvent)
             }
           } else {
             const buffer = toolCallBuffers.get(openaiIndex)!
@@ -604,7 +626,7 @@ async function* convertOpenAIStreamToAnthropic(
             // name 晚到且尚未 start 时，此处补发 content_block_start
             if (!buffer.started && buffer.name) {
               buffer.started = true
-              yield {
+              yield* emitEvent({
                 type: 'content_block_start',
                 index: buffer.blockIndex,
                 content_block: {
@@ -613,15 +635,15 @@ async function* convertOpenAIStreamToAnthropic(
                   name: buffer.name,
                   input: '',
                 },
-              } as Anthropic.Messages.RawMessageStreamEvent
+              } as Anthropic.Messages.RawMessageStreamEvent)
             }
             if (toolCall.function?.arguments) {
               buffer.args += toolCall.function.arguments
-              yield {
+              yield* emitEvent({
                 type: 'content_block_delta',
                 index: buffer.blockIndex,
                 delta: { type: 'input_json_delta', partial_json: toolCall.function.arguments },
-              } as Anthropic.Messages.RawMessageStreamEvent
+              } as Anthropic.Messages.RawMessageStreamEvent)
             }
           }
         }
@@ -653,20 +675,22 @@ async function* convertOpenAIStreamToAnthropic(
     // 不发送 message_delta（避免误导下游认为流正常结束）。
     if (hasStarted) {
       if (hasTextBlock && textBlockIndex >= 0) {
-        yield {
+        yield* emitEvent({
           type: 'content_block_stop',
           index: textBlockIndex,
-        } as Anthropic.Messages.RawMessageStreamEvent
+        } as Anthropic.Messages.RawMessageStreamEvent)
       }
       for (const entry of toolCallBuffers.values()) {
         if (entry.started) {
-          yield {
+          yield* emitEvent({
             type: 'content_block_stop',
             index: entry.blockIndex,
-          } as Anthropic.Messages.RawMessageStreamEvent
+          } as Anthropic.Messages.RawMessageStreamEvent)
         }
       }
-      yield { type: 'message_stop' } as Anthropic.Messages.RawMessageStreamEvent
+      yield* emitEvent({
+        type: 'message_stop',
+      } as Anthropic.Messages.RawMessageStreamEvent)
     }
     throw error
   }
@@ -709,37 +733,51 @@ function getResponseDebugMeta(response?: Response) {
   }
 }
 
-function truncateForDebug(value: string, maxLength = 800): string {
-  if (value.length <= maxLength) {
-    return value
-  }
-  return `${value.slice(0, maxLength)}... [truncated ${value.length - maxLength} chars]`
+function isOpencodePayloadLoggingEnabled(): boolean {
+  return isEnvTruthy(process.env[OPENCODE_DEBUG_PAYLOADS_ENV])
 }
 
-function getErrorHeader(responseLike: unknown, key: string): string {
-  const headers = (responseLike as { headers?: Headers } | null | undefined)?.headers
-  return headers?.get(key) ?? 'n/a'
-}
-
-function getErrorRequestId(error: unknown): string {
-  const candidate = error as
-    | { request_id?: string; requestID?: string }
-    | undefined
-  return candidate?.request_id ?? candidate?.requestID ?? 'n/a'
-}
-
-function getErrorBodySummary(error: unknown): string {
-  const body = (error as { error?: unknown } | null | undefined)?.error
-  if (body === undefined || body === null) {
-    return 'none'
-  }
-
+function stringifyForDebug(payload: unknown): string {
   try {
-    return truncateForDebug(
-      typeof body === 'string' ? body : JSON.stringify(body),
-    )
-  } catch {
-    return truncateForDebug(String(body))
+    return JSON.stringify(payload)
+  } catch (error) {
+    return JSON.stringify({
+      stringify_error: error instanceof Error ? error.message : String(error),
+      fallback: String(payload),
+    })
+  }
+}
+
+function logOpencodePayload(stage: string, payload: unknown): void {
+  if (!isOpencodePayloadLoggingEnabled()) {
+    return
+  }
+  logForDebugging(`[API:opencode:payload] ${stage}: ${stringifyForDebug(payload)}`)
+}
+
+function getErrorPayload(error: unknown) {
+  const errorRecord = error as
+    | {
+        status?: number | string
+        message?: string
+        request_id?: string
+        requestID?: string
+        error?: unknown
+        headers?: Headers
+      }
+    | undefined
+
+  return {
+    status: errorRecord?.status ?? 'unknown',
+    message: errorRecord?.message ?? String(error),
+    request_id: errorRecord?.request_id ?? errorRecord?.requestID ?? 'n/a',
+    headers: {
+      'x-request-id': errorRecord?.headers?.get('x-request-id') ?? 'n/a',
+      'request-id': errorRecord?.headers?.get('request-id') ?? 'n/a',
+      'cf-ray': errorRecord?.headers?.get('cf-ray') ?? 'n/a',
+      'retry-after': errorRecord?.headers?.get('retry-after') ?? 'n/a',
+    },
+    body: errorRecord?.error ?? null,
   }
 }
 
@@ -940,8 +978,8 @@ export class OpencodeAdapter {
     // 将 stop_sequences 从 Anthropic 映射到 OpenAI
     const stop = params.stop_sequences ?? undefined
 
-    logForDebugging(`[API:opencode] Original model: ${originalModel}, Using free model: ${model}, stream: ${isStream}, messages: ${messages.length}, tools: ${tools?.length || 0}`)
-    logForDebugging(`[API:opencode] Converted messages: ${JSON.stringify(messages.map(m => ({ role: m.role, content: typeof m.content === 'string' ? m.content.substring(0, 50) : '...', hasToolCalls: 'tool_calls' in m, toolCallId: 'tool_call_id' in m ? (m as any).tool_call_id : undefined })))}`)
+    logOpencodePayload('anthropic.request', params)
+    logOpencodePayload('openai.converted_messages', messages)
 
     const promiseFn = async (): Promise<{ data: AsyncIterable<Anthropic.Messages.RawMessageStreamEvent>; response?: Response; request_id?: string }> => {
       const requestParams: OpenAI.Chat.ChatCompletionCreateParams = {
@@ -984,6 +1022,10 @@ export class OpencodeAdapter {
         ...getOpencodeHeaders(undefined, randomUUID()),
         ...(options?.headers ?? {}),
       }
+      logOpencodePayload('openai.request', {
+        requestParams,
+        requestHeaders,
+      })
 
       // 构造 create 的第二参数：RequestOptions（signal/headers）
       const hasSignal = !!options?.signal
@@ -1012,18 +1054,26 @@ export class OpencodeAdapter {
           requestId = rawResponse?.headers?.get('x-request-id') ?? undefined
           if (rawResponse) {
             const debugMeta = getResponseDebugMeta(rawResponse)
-            logForDebugging(
-              `[API:opencode] Upstream stream response status=${debugMeta.status}, request_id=${requestId ?? 'n/a'}, x-request-id=${debugMeta.xRequestId}, request-id=${debugMeta.requestId}, cf-ray=${debugMeta.cfRay}`,
-            )
+            logOpencodePayload('openai.stream_response_meta', {
+              request_id: requestId ?? 'n/a',
+              ...debugMeta,
+            })
           }
         } else {
           openaiResponse = await openaiPromise
+          logOpencodePayload('openai.response', openaiResponse)
         }
       } catch (error) {
-        logForDebugging(
-          `[API:opencode] Request failed: model=${model}, stream=${isStream}, request_header=${requestHeaders[OPENCODE_HEADERS.REQUEST] ?? 'n/a'}, session=${requestHeaders[OPENCODE_HEADERS.SESSION] ?? 'n/a'}, project=${requestHeaders[OPENCODE_HEADERS.PROJECT] ?? 'n/a'}, status=${String((error as { status?: number | string } | undefined)?.status ?? 'unknown')}, request_id=${getErrorRequestId(error)}, x-request-id=${getErrorHeader(error, 'x-request-id')}, request-id=${getErrorHeader(error, 'request-id')}, cf-ray=${getErrorHeader(error, 'cf-ray')}, retry-after=${getErrorHeader(error, 'retry-after')}, message=${truncateForDebug((error as Error)?.message ?? String(error))}, body=${getErrorBodySummary(error)}`,
-          { level: 'error' },
-        )
+        logOpencodePayload('openai.error', {
+          request: {
+            model,
+            stream: isStream,
+            request_header: requestHeaders[OPENCODE_HEADERS.REQUEST] ?? 'n/a',
+            session: requestHeaders[OPENCODE_HEADERS.SESSION] ?? 'n/a',
+            project: requestHeaders[OPENCODE_HEADERS.PROJECT] ?? 'n/a',
+          },
+          error: getErrorPayload(error),
+        })
         throw error
       }
 
@@ -1090,6 +1140,7 @@ export class OpencodeAdapter {
           cache_read_input_tokens: null,
         },
       } as unknown as Anthropic.Messages.Message & { _request_id?: string }
+      logOpencodePayload('anthropic.response', messageObj)
 
       // 同时让其可迭代（兼容按流式协议消费的调用方）
       // 预构建事件数组并缓存，避免重复迭代时重新生成，
