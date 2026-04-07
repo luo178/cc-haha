@@ -44,19 +44,103 @@ function getOpencodeBaseUrl(): string {
   return OPENCODE_BASE_URL
 }
 
-// opencode 免费模型列表
-const OPENCODE_FREE_MODELS = [
-  'mimo-v2-omni-free',
-  'mimo-v2-pro-free',
-  'nemotron-3-super-free',
-  'mimo-v2-flash-free',
+// ---------------------------------------------------------------------------
+// 动态模型列表：从 models.dev 获取 opencode provider 的免费模型
+// ---------------------------------------------------------------------------
+
+const MODELS_DEV_URL = 'https://models.dev/api.json'
+
+type ModelsDevEntry = {
+  id: string
+  cost?: { input?: number; output?: number; cache_read?: number; cache_write?: number }
+  status?: string
+  release_date?: string
+  limit?: { context?: number; input?: number; output?: number }
+}
+
+type CachedModels = { freeModels: string[]; defaultModel: string }
+
+const OPENCODE_FALLBACK_FREE_MODELS = [
   'qwen3.6-plus-free',
-  'trinity-large-preview-free',
+  'nemotron-3-super-free',
   'minimax-m2.5-free',
-  'minimax-m2.7-free',
+  'big-pickle',
+  'gpt-5-nano',
 ] as const
-// 默认使用 qwen3.6-plus-free
-const OPENCODE_DEFAULT_MODEL = 'qwen3.6-plus-free'
+
+const OPENCODE_FALLBACK_DEFAULT_MODEL = OPENCODE_FALLBACK_FREE_MODELS[0]
+
+let cachedModels: Promise<CachedModels> | null = null
+
+/**
+ * 从 models.dev 获取 opencode provider 的模型列表，
+ * 筛选出免费模型（cost.input === 0，排除 deprecated/alpha），
+ * 按 release_date 降序、context 降序排序，
+ * 默认模型取最新日期且 context 最大的。
+ */
+async function fetchOpencodeModels(): Promise<CachedModels> {
+  const response = await fetch(MODELS_DEV_URL, {
+    signal: AbortSignal.timeout(10_000),
+  })
+  if (!response.ok) {
+    throw new Error(`models.dev returned ${response.status}`)
+  }
+  const data: Record<string, { models?: Record<string, ModelsDevEntry> }> = await response.json()
+  const opencodeModels = data['opencode']?.models ?? {}
+
+  const freeEntries: { id: string; releaseDate: string; context: number }[] = []
+  for (const [id, entry] of Object.entries(opencodeModels)) {
+    const costInput = entry.cost?.input ?? 1
+    const status = entry.status ?? 'active'
+    if (costInput === 0 && status !== 'deprecated' && status !== 'alpha') {
+      freeEntries.push({
+        id,
+        releaseDate: entry.release_date ?? '1970-01-01',
+        context: entry.limit?.context ?? 0,
+      })
+    }
+  }
+
+  // release_date 降序；日期相同时 context 降序
+  freeEntries.sort((a, b) => {
+    const dateCmp = b.releaseDate.localeCompare(a.releaseDate)
+    if (dateCmp !== 0) return dateCmp
+    return b.context - a.context
+  })
+
+  const freeModels = freeEntries.map(e => e.id)
+  const defaultModel = freeEntries.length > 0 ? freeEntries[0].id : OPENCODE_FALLBACK_DEFAULT_MODEL
+
+  logForDebugging(
+    `[API:opencode] Loaded ${Object.keys(opencodeModels).length} provider models from models.dev; ` +
+    `${freeModels.length} free models available; default="${defaultModel}"; ` +
+    `models=${freeModels.join(', ')}`,
+  )
+
+  return { freeModels, defaultModel }
+}
+
+/**
+ * 获取缓存的模型列表（首次调用时触发 fetch，之后复用结果）。
+ * 失败时回退到内置的已知免费模型列表。
+ */
+async function getOpencodeModels(): Promise<CachedModels> {
+  if (!cachedModels) {
+    cachedModels = fetchOpencodeModels().catch((err) => {
+      logForDebugging(`[API:opencode] Failed to fetch models from models.dev: ${err}`)
+      logForDebugging(
+        `[API:opencode] Falling back to built-in free models; ` +
+        `default="${OPENCODE_FALLBACK_DEFAULT_MODEL}"; ` +
+        `models=${OPENCODE_FALLBACK_FREE_MODELS.join(', ')}`,
+      )
+      return {
+        freeModels: [...OPENCODE_FALLBACK_FREE_MODELS],
+        defaultModel: OPENCODE_FALLBACK_DEFAULT_MODEL,
+      }
+    })
+  }
+  return cachedModels
+}
 
 /** OpenCode 相关环境变量名 */
 const OPENCODE_ENV = {
@@ -113,13 +197,14 @@ export function getOpencodeHeaders(sessionId?: string, requestId?: string) {
  * 将请求模型解析为 OpenCode 实际可用模型。
  * 若在免费模型列表中则原样使用，否则回退到默认模型。
  */
-function resolveOpencodeModel(requestedModel: string): string {
+async function resolveOpencodeModel(requestedModel: string): Promise<string> {
+  const { freeModels, defaultModel } = await getOpencodeModels()
   const normalized = requestedModel.toLowerCase()
-  const resolved = (OPENCODE_FREE_MODELS as readonly string[]).some(
+  const resolved = freeModels.some(
     m => m.toLowerCase() === normalized,
   )
     ? requestedModel
-    : OPENCODE_DEFAULT_MODEL
+    : defaultModel
   if (resolved !== requestedModel) {
     logForDebugging(
       `[API:opencode] Model "${requestedModel}" not in free list, falling back to "${resolved}"`,
@@ -525,8 +610,9 @@ async function* convertOpenAIStreamToAnthropic(
       if (!hasStarted) {
         hasStarted = true
         messageId = chunk.id || randomUUID()
-        inputTokens = chunk.usage?.prompt_tokens || 0
-        outputTokens = chunk.usage?.completion_tokens || 0
+        const usageTokens = getUsageTokens(chunk.usage)
+        inputTokens = usageTokens.inputTokens
+        outputTokens = usageTokens.outputTokens
         yield* emitEvent({
           type: 'message_start',
           message: {
@@ -651,8 +737,9 @@ async function* convertOpenAIStreamToAnthropic(
 
       // 跟踪 token 用量
       if (chunk.usage) {
-        inputTokens = chunk.usage.prompt_tokens || inputTokens
-        outputTokens = chunk.usage.completion_tokens || outputTokens
+        const usageTokens = getUsageTokens(chunk.usage)
+        inputTokens = usageTokens.inputTokens || inputTokens
+        outputTokens = usageTokens.outputTokens || outputTokens
       }
 
       // 完成态
@@ -755,6 +842,67 @@ function logOpencodePayload(stage: string, payload: unknown): void {
   logForDebugging(`[API:opencode:payload] ${stage}: ${stringifyForDebug(payload)}`)
 }
 
+function parseTokenCount(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : 0
+}
+
+function getUsageTokens(
+  usage: unknown,
+): { inputTokens: number; outputTokens: number } {
+  const usageRecord = (usage ?? null) as
+    | {
+        prompt_tokens?: unknown
+        completion_tokens?: unknown
+      }
+    | null
+
+  return {
+    inputTokens: parseTokenCount(usageRecord?.prompt_tokens),
+    outputTokens: parseTokenCount(usageRecord?.completion_tokens),
+  }
+}
+
+function formatOpencodeErrorSummary(errorBody: unknown): string | null {
+  const body = (errorBody ?? null) as
+    | {
+        message?: unknown
+        metadata?: {
+          raw?: unknown
+          provider_name?: unknown
+          is_byok?: unknown
+        }
+      }
+    | null
+
+  const parts: string[] = []
+  const providerName =
+    typeof body?.metadata?.provider_name === 'string'
+      ? body.metadata.provider_name
+      : null
+  const rawMessage =
+    typeof body?.metadata?.raw === 'string' ? body.metadata.raw : null
+  const bodyMessage =
+    typeof body?.message === 'string' ? body.message : null
+  const byok =
+    typeof body?.metadata?.is_byok === 'boolean'
+      ? body.metadata.is_byok
+      : null
+
+  if (providerName) {
+    parts.push(`provider=${providerName}`)
+  }
+  if (rawMessage) {
+    parts.push(`upstream="${rawMessage}"`)
+  } else if (bodyMessage) {
+    parts.push(`body_message="${bodyMessage}"`)
+  }
+  if (byok !== null) {
+    parts.push(`byok=${String(byok)}`)
+  }
+
+  return parts.length > 0 ? parts.join('; ') : null
+}
+
 function getErrorPayload(error: unknown) {
   const errorRecord = error as
     | {
@@ -766,6 +914,8 @@ function getErrorPayload(error: unknown) {
         headers?: Headers
       }
     | undefined
+  const errorBody = errorRecord?.error ?? null
+  const detail = formatOpencodeErrorSummary(errorBody)
 
   return {
     status: errorRecord?.status ?? 'unknown',
@@ -777,7 +927,8 @@ function getErrorPayload(error: unknown) {
       'cf-ray': errorRecord?.headers?.get('cf-ray') ?? 'n/a',
       'retry-after': errorRecord?.headers?.get('retry-after') ?? 'n/a',
     },
-    body: errorRecord?.error ?? null,
+    body: errorBody,
+    detail,
   }
 }
 
@@ -835,7 +986,7 @@ export class OpencodeAdapter {
           // OpenCode 无 count-tokens 接口：先转为 OpenAI 消息，
           // 用最小请求估算；失败时回退到基于字符的粗略估算。
           try {
-            const model = resolveOpencodeModel(params.model)
+            const model = await resolveOpencodeModel(params.model)
             const openaiMessages = convertAnthropicMessagesToOpenAI(params.messages, params.system)
             const completion = await this.client.chat.completions.create({
               model,
@@ -843,7 +994,7 @@ export class OpencodeAdapter {
               max_tokens: 1,
               temperature: 0,
             })
-            const promptTokens = completion.usage?.prompt_tokens ?? 0
+            const promptTokens = getUsageTokens(completion.usage).inputTokens
             return { input_tokens: promptTokens }
           } catch {
             // 启发式 token 估算（按语言加权）：
@@ -920,7 +1071,8 @@ export class OpencodeAdapter {
       list: async function* (_params?: { betas?: string[] }) {
         // OpenCode 无模型列表接口；
         // 返回已知免费模型，供 refreshModelCapabilities() 缓存。
-        for (const modelId of OPENCODE_FREE_MODELS) {
+        const { freeModels } = await getOpencodeModels()
+        for (const modelId of freeModels) {
           yield {
             id: modelId,
             created: 0,
@@ -953,8 +1105,6 @@ export class OpencodeAdapter {
     asResponse: () => Promise<Response>
   } {
     const originalModel = params.model
-    // 使用免费模型
-    const model = resolveOpencodeModel(originalModel)
     const isStream = params.stream === true
 
     // 转换消息格式（含 system 参数处理）
@@ -982,6 +1132,7 @@ export class OpencodeAdapter {
     logOpencodePayload('openai.converted_messages', messages)
 
     const promiseFn = async (): Promise<{ data: AsyncIterable<Anthropic.Messages.RawMessageStreamEvent>; response?: Response; request_id?: string }> => {
+      const model = await resolveOpencodeModel(originalModel)
       const requestParams: OpenAI.Chat.ChatCompletionCreateParams = {
         model,
         messages,
@@ -1064,6 +1215,7 @@ export class OpencodeAdapter {
           logOpencodePayload('openai.response', openaiResponse)
         }
       } catch (error) {
+        const errorPayload = getErrorPayload(error)
         logOpencodePayload('openai.error', {
           request: {
             model,
@@ -1072,8 +1224,17 @@ export class OpencodeAdapter {
             session: requestHeaders[OPENCODE_HEADERS.SESSION] ?? 'n/a',
             project: requestHeaders[OPENCODE_HEADERS.PROJECT] ?? 'n/a',
           },
-          error: getErrorPayload(error),
+          error: errorPayload,
         })
+        if (errorPayload.status === 429 || errorPayload.status === '429') {
+          const detailSuffix = errorPayload.detail
+            ? `; ${errorPayload.detail}`
+            : ''
+          logForDebugging(
+            `[API:opencode] Upstream rate limit for model "${model}"${detailSuffix}`,
+            { level: 'error' },
+          )
+        }
         throw error
       }
 
@@ -1120,8 +1281,9 @@ export class OpencodeAdapter {
         })
       }
 
-      const inputTokens = completion.usage?.prompt_tokens || 0
-      const outputTokens = completion.usage?.completion_tokens || 0
+      const usageTokens = getUsageTokens(completion.usage)
+      const inputTokens = usageTokens.inputTokens
+      const outputTokens = usageTokens.outputTokens
 
       // 构造 Message 对象（供下游同步访问）
       const messageObj = {
