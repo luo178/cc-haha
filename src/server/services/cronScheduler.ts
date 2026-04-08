@@ -314,6 +314,22 @@ export class CronScheduler {
    * @param options.createSession When true, creates a Session for rich output viewing (used for manual "Run Now")
    */
   async executeTask(task: CronTask, options?: { createSession?: boolean }): Promise<TaskRun> {
+    // Prevent concurrent executions of the same task
+    const existing = this.runningTasks.get(task.id)
+    if (existing) {
+      console.log(
+        `[CronScheduler] Task ${task.id} is already running (runId=${existing.runId}), skipping`,
+      )
+      return {
+        id: existing.runId,
+        taskId: task.id,
+        taskName: task.name || task.prompt.slice(0, 60),
+        startedAt: new Date(existing.startedAt).toISOString(),
+        status: 'running',
+        prompt: task.prompt,
+      }
+    }
+
     const runId = crypto.randomBytes(6).toString('hex')
     const startedAt = new Date().toISOString()
     const workDir = task.folderPath || os.homedir()
