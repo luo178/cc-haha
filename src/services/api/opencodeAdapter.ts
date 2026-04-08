@@ -1226,15 +1226,13 @@ export class OpencodeAdapter {
           },
           error: errorPayload,
         })
-        if (errorPayload.status === 429 || errorPayload.status === '429') {
-          const detailSuffix = errorPayload.detail
-            ? `; ${errorPayload.detail}`
-            : ''
-          logForDebugging(
-            `[API:opencode] Upstream rate limit for model "${model}"${detailSuffix}`,
-            { level: 'error' },
-          )
-        }
+        const detailSuffix = errorPayload.detail
+          ? `; ${errorPayload.detail}`
+          : ''
+        logForDebugging(
+          `[API:opencode] Request failed for model "${model}": ${errorPayload.message}${detailSuffix} (status: ${errorPayload.status})`,
+          { level: 'error' },
+        )
         throw error
       }
 
