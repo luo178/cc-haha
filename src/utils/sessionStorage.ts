@@ -969,6 +969,30 @@ class Project {
     )
   }
 
+  private getPersistenceSkipReason():
+    | 'test_env'
+    | 'cleanup_period_zero'
+    | 'session_persistence_disabled'
+    | 'skip_prompt_history'
+    | null {
+    const allowTestPersistence = isEnvTruthy(
+      process.env.TEST_ENABLE_SESSION_PERSISTENCE,
+    )
+    if (getNodeEnv() === 'test' && !allowTestPersistence) {
+      return 'test_env'
+    }
+    if (getSettings_DEPRECATED()?.cleanupPeriodDays === 0) {
+      return 'cleanup_period_zero'
+    }
+    if (isSessionPersistenceDisabled()) {
+      return 'session_persistence_disabled'
+    }
+    if (isEnvTruthy(process.env.CLAUDE_CODE_SKIP_PROMPT_HISTORY)) {
+      return 'skip_prompt_history'
+    }
+    return null
+  }
+
   /**
    * Create the session file, write cached startup metadata, and flush
    * buffered entries. Called on the first user/assistant message.
@@ -977,8 +1001,16 @@ class Project {
     // Guard here too — reAppendSessionMetadata writes via appendEntryToFile
     // (not appendEntry) so it would bypass the per-entry persistence check
     // and create a metadata-only file despite --no-session-persistence.
-    if (this.shouldSkipPersistence()) return
+    if (this.shouldSkipPersistence()) {
+      logForDebugging(
+        `[SESSION:PERSISTENCE] skip_materialize session=${getSessionId()} reason=${this.getPersistenceSkipReason() ?? 'unknown'} originalCwd=${getOriginalCwd()} sessionProjectDir=${getSessionProjectDir() ?? 'null'}`,
+      )
+      return
+    }
     this.ensureCurrentSessionFile()
+    logForDebugging(
+      `[SESSION:PERSISTENCE] materialized session=${getSessionId()} transcriptPath=${this.sessionFile} originalCwd=${getOriginalCwd()} sessionProjectDir=${getSessionProjectDir() ?? 'null'}`,
+    )
     // mode/agentSetting are cache-only pre-materialization; write them now.
     this.reAppendSessionMetadata()
     if (this.pendingEntries.length > 0) {

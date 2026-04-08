@@ -1,7 +1,15 @@
 import { appendFile, mkdir, symlink, unlink } from 'fs/promises'
 import memoize from 'lodash-es/memoize.js'
 import { dirname, join } from 'path'
-import { getSessionId } from 'src/bootstrap/state.js'
+import {
+  getIsNonInteractiveSession,
+  getIsRemoteMode,
+  onSessionSwitch,
+  getOriginalCwd,
+  getSessionId,
+  getSessionProjectDir,
+  isSessionPersistenceDisabled,
+} from 'src/bootstrap/state.js'
 
 import { type BufferedWriter, createBufferedWriter } from './bufferedWriter.js'
 import { registerCleanup } from './cleanupRegistry.js'
@@ -134,6 +142,8 @@ export function getHasFormattedOutput(): boolean {
 
 let debugWriter: BufferedWriter | null = null
 let pendingWrite: Promise<void> = Promise.resolve()
+const debugLogMetadataWritten = new Set<string>()
+let sessionTraceInstalled = false
 
 // Module-level so .bind captures only its explicit args, not the
 // writeFn closure's parent scope (Jarred, #22257).
@@ -152,6 +162,44 @@ async function appendAsync(
 
 function noop(): void {}
 
+function formatDebugLogMetadataLine(path: string): string {
+  const timestamp = new Date().toISOString()
+  const metadata = getSessionTraceMetadata(path)
+  return `${timestamp} [SESSION:META] ${jsonStringify(metadata)}\n`
+}
+
+function getSessionTraceMetadata(path?: string) {
+  return {
+    sessionId: getSessionId(),
+    debugLogPath: path,
+    originalCwd: getOriginalCwd(),
+    sessionProjectDir: getSessionProjectDir(),
+    remoteMode: getIsRemoteMode(),
+    nonInteractiveSession: getIsNonInteractiveSession(),
+    sessionPersistenceDisabled: isSessionPersistenceDisabled(),
+    skipPromptHistory: isEnvTruthy(process.env.CLAUDE_CODE_SKIP_PROMPT_HISTORY),
+    debugFileOverride: getDebugFilePath(),
+    debugLogsDirOverride: process.env.CLAUDE_CODE_DEBUG_LOGS_DIR ?? null,
+  }
+}
+
+export function logSessionDebugTrace(reason: string): void {
+  const metadata = getSessionTraceMetadata(getDebugLogPath())
+  logForDebugging(
+    `[SESSION:TRACE] ${reason} ${jsonStringify(metadata)}`,
+  )
+}
+
+export function installDebugSessionTracing(): void {
+  if (sessionTraceInstalled) {
+    return
+  }
+  sessionTraceInstalled = true
+  onSessionSwitch(() => {
+    logSessionDebugTrace('session_switched')
+  })
+}
+
 function getDebugWriter(): BufferedWriter {
   if (!debugWriter) {
     let ensuredDir: string | null = null
@@ -161,6 +209,13 @@ function getDebugWriter(): BufferedWriter {
         const dir = dirname(path)
         const needMkdir = ensuredDir !== dir
         ensuredDir = dir
+        const metadataLine = debugLogMetadataWritten.has(path)
+          ? ''
+          : formatDebugLogMetadataLine(path)
+        if (metadataLine) {
+          debugLogMetadataWritten.add(path)
+          content = metadataLine + content
+        }
         if (isDebugMode()) {
           // immediateMode: must stay sync. Async writes are lost on direct
           // process.exit() and keep the event loop alive in beforeExit
