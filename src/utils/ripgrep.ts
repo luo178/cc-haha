@@ -55,13 +55,34 @@ const getRipgrepConfig = memoize((): RipgrepConfig => {
     }
   }
 
+  // Try vendor ripgrep, but check if it exists first
   const rgRoot = path.resolve(__dirname, 'vendor', 'ripgrep')
-  const command =
+  const vendorCommand =
     process.platform === 'win32'
       ? path.resolve(rgRoot, `${process.arch}-win32`, 'rg.exe')
       : path.resolve(rgRoot, `${process.arch}-${process.platform}`, 'rg')
 
-  return { mode: 'builtin', command, args: [] }
+  // Check if vendor ripgrep exists
+  let vendorExists = false
+  try {
+    require('fs').accessSync(vendorCommand)
+    vendorExists = true
+  } catch {
+    vendorExists = false
+  }
+
+  if (vendorExists) {
+    return { mode: 'builtin', command: vendorCommand, args: [] }
+  }
+
+  // Fallback: try system ripgrep as last resort (even if user set USE_BUILTIN_RIPGREP=1)
+  const { cmd: fallbackPath } = findExecutable('rg', [])
+  if (fallbackPath !== 'rg') {
+    return { mode: 'system', command: 'rg', args: [] }
+  }
+
+  // No ripgrep found - return vendor path anyway and let it fail with proper error
+  return { mode: 'builtin', command: vendorCommand, args: [] }
 })
 
 export function ripgrepCommand(): {
