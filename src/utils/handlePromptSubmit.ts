@@ -299,6 +299,27 @@ export async function handlePromptSubmit(
       // Skip if onDone already fired — prevents stuck isLocalJSXCommand
       // (see processSlashCommand.tsx local-jsx case for full mechanism).
       if (jsx && !doneWasCalled) {
+        // Check if setToolJSX is a no-op (SDK mode without UI support).
+        // In SDK/VSCode extension mode, setToolJSX is () => {}, so we can't render local-jsx UI.
+        // Instead, show a helpful message directing users to the terminal.
+        const setToolJSXString = setToolJSX.toString()
+        if (
+          setToolJSXString === '() => {}' ||
+          setToolJSXString === 'function () {}'
+        ) {
+          // SDK mode - return a message instead of rendering UI
+          // Set doneWasCalled to prevent the onDone in the callback from overwriting our message
+          doneWasCalled = true
+          // Use display: 'system' so the message shows up in SDK mode
+          onDone(
+            `/${commandName} is not available in this environment.\n\n` +
+              `This command requires a terminal-based Claude Code session to display its UI.\n` +
+              `Please run "claude" from your terminal to use /${commandName}.`,
+            { display: 'system' },
+          )
+          return
+        }
+
         setToolJSX({
           jsx,
           shouldHidePromptInput: false,
