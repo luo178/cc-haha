@@ -56,7 +56,7 @@ function makeTeamConfig(overrides?: Record<string, unknown>) {
         agentId: 'agent-lead',
         name: 'Lead Agent',
         agentType: 'lead',
-        model: 'claude-opus-4-6',
+        model: 'claude-opus-4-7',
         color: '#ff0000',
         joinedAt: 1700000000000,
         tmuxPaneId: '%0',

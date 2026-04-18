@@ -223,7 +223,7 @@ describe('Business Flow: Agent Management', () => {
     const { status, data } = await api('POST', '/api/agents', {
       name: 'security-auditor',
       description: 'Audits code for security vulnerabilities',
-      model: 'claude-opus-4-6',
+      model: 'claude-opus-4-7',
       tools: ['Read', 'Grep', 'Glob', 'Bash'],
       systemPrompt: 'You are a security expert. Focus on OWASP top 10.',
       color: 'red',
@@ -258,7 +258,7 @@ describe('Business Flow: Agent Management', () => {
     const { data } = await api('GET', '/api/agents/security-auditor')
     expect(data.agent.name).toBe('security-auditor')
     expect(data.agent.description).toContain('security')
-    expect(data.agent.model).toBe('claude-opus-4-6')
+    expect(data.agent.model).toBe('claude-opus-4-7')
     expect(data.agent.systemPrompt).toContain('OWASP')
   })
 
@@ -323,8 +323,8 @@ describe('Business Flow: Models & Effort', () => {
     const { data } = await api('GET', '/api/models')
     expect(data.models.length).toBe(4)
     const names = data.models.map((m: any) => m.name)
-    expect(names).toContain('Opus 4.6')
-    expect(names).toContain('Opus 4.6 1M')
+    expect(names).toContain('Opus 4.7')
+    expect(names).toContain('Opus 4.7 1M')
     expect(names).toContain('Sonnet 4.6')
     expect(names).toContain('Haiku 4.5')
   })
@@ -334,15 +334,15 @@ describe('Business Flow: Models & Effort', () => {
     expect(data.model.id).toBe('claude-sonnet-4-6')
   })
 
-  it('should switch to Opus 4.6', async () => {
+  it('should switch to Opus 4.7', async () => {
     const { status } = await api('PUT', '/api/models/current', {
-      modelId: 'claude-opus-4-6',
+      modelId: 'claude-opus-4-7',
     })
     expect(status).toBe(200)
 
     const { data } = await api('GET', '/api/models/current')
-    expect(data.model.id).toBe('claude-opus-4-6')
-    expect(data.model.name).toBe('Opus 4.6')
+    expect(data.model.id).toBe('claude-opus-4-7')
+    expect(data.model.name).toBe('Opus 4.7')
   })
 
   it('should switch to Haiku 4.5', async () => {
@@ -389,13 +389,13 @@ describe('Business Flow: Models & Effort', () => {
   })
 
   it('should persist model and effort to settings file', async () => {
-    await api('PUT', '/api/models/current', { modelId: 'claude-opus-4-6' })
+    await api('PUT', '/api/models/current', { modelId: 'claude-opus-4-7' })
     await api('PUT', '/api/effort', { level: 'high' })
 
     const settingsPath = path.join(tmpDir, 'settings.json')
     const raw = await fs.readFile(settingsPath, 'utf-8')
     const settings = JSON.parse(raw)
-    expect(settings.model).toBe('claude-opus-4-6')
+    expect(settings.model).toBe('claude-opus-4-7')
     expect(settings.effort).toBe('high')
   })
 })
@@ -716,7 +716,7 @@ describe('Business Flow: Settings Persistence', () => {
   it('should write and read complex settings', async () => {
     const settings = {
       theme: 'dark',
-      model: 'claude-opus-4-6',
+      model: 'claude-opus-4-7',
       effort: 'high',
       outputStyle: 'verbose',
       permissions: {
@@ -729,7 +729,7 @@ describe('Business Flow: Settings Persistence', () => {
     const { data } = await api('GET', '/api/settings/user')
 
     expect(data.theme).toBe('dark')
-    expect(data.model).toBe('claude-opus-4-6')
+    expect(data.model).toBe('claude-opus-4-7')
     expect(data.permissions.allow).toContain('Read')
     expect(data.permissions.deny).toContain('Bash(rm -rf /)')
   })

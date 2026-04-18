@@ -79,7 +79,7 @@ function makeAssistantEntry(content: string, parentUuid?: string): Record<string
     isSidechain: false,
     type: 'assistant',
     message: {
-      model: 'claude-opus-4-6',
+      model: 'claude-opus-4-7',
       id: `msg_${crypto.randomUUID().slice(0, 20)}`,
       type: 'message',
       role: 'assistant',
@@ -261,7 +261,7 @@ describe('SessionService', () => {
         isSidechain: false,
         type: 'assistant',
         message: {
-          model: 'claude-opus-4-6',
+          model: 'claude-opus-4-7',
           id: `msg_${crypto.randomUUID().slice(0, 20)}`,
           type: 'message',
           role: 'assistant',
@@ -282,7 +282,7 @@ describe('SessionService', () => {
         isSidechain: true,
         type: 'assistant',
         message: {
-          model: 'claude-opus-4-6',
+          model: 'claude-opus-4-7',
           id: `msg_${crypto.randomUUID().slice(0, 20)}`,
           type: 'message',
           role: 'assistant',

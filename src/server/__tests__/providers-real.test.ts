@@ -90,10 +90,10 @@ describe('Real Provider Configs', () => {
       baseUrl: 'https://api.jiekou.ai/anthropic',
       apiKey: 'sk-fake-test-key-for-testing-only',
       models: {
-        main: 'claude-opus-4-6',
+        main: 'claude-opus-4-7',
         haiku: 'claude-haiku-4-5',
         sonnet: 'claude-sonnet-4-6',
-        opus: 'claude-opus-4-6',
+        opus: 'claude-opus-4-7',
       },
     })
 
@@ -107,7 +107,7 @@ describe('Real Provider Configs', () => {
     settings = await readCcHahaSettings()
     expect((settings.env as Record<string, string>).ANTHROPIC_BASE_URL).toBe('https://api.jiekou.ai/anthropic')
     expect((settings.env as Record<string, string>).ANTHROPIC_AUTH_TOKEN).toBe('sk-fake-test-key-for-testing-only')
-    expect((settings.env as Record<string, string>).ANTHROPIC_MODEL).toBe('claude-opus-4-6')
+    expect((settings.env as Record<string, string>).ANTHROPIC_MODEL).toBe('claude-opus-4-7')
 
     // 验证 activeId 正确
     const list = await service.listProviders()
@@ -139,10 +139,10 @@ describe('Real Provider Configs', () => {
       baseUrl: 'https://api.jiekou.ai/anthropic',
       apiKey: 'sk_test',
       models: {
-        main: 'claude-opus-4-6',
+        main: 'claude-opus-4-7',
         haiku: 'claude-haiku-4-5',
         sonnet: 'claude-sonnet-4-6',
-        opus: 'claude-opus-4-6',
+        opus: 'claude-opus-4-7',
       },
     })
     await service.activateProvider(provider.id)

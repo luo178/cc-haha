@@ -16,8 +16,8 @@ import { ApiError, errorResponse } from '../middleware/errorHandler.js'
 
 const DEFAULT_MODELS = [
   {
-    id: 'claude-opus-4-6',
-    name: 'Opus 4.6',
+    id: 'claude-opus-4-7',
+    name: 'Opus 4.7',
     description: 'Most capable for ambitious work',
     context: '1m',
   },
@@ -37,7 +37,7 @@ const DEFAULT_MODELS = [
 
 const EFFORT_LEVELS = ['low', 'medium', 'high', 'max'] as const
 
-const DEFAULT_MODEL = 'claude-opus-4-6'
+const DEFAULT_MODEL = 'claude-opus-4-7'
 const DEFAULT_EFFORT = 'max'
 
 const settingsService = new SettingsService()
@@ -162,7 +162,7 @@ async function handleCurrentModel(req: Request): Promise<Response> {
       throw ApiError.badRequest('Missing or invalid "modelId" in request body')
     }
 
-    // Parse composite IDs like 'claude-opus-4-6-20250610:1m'
+    // Parse composite IDs like 'claude-opus-4-7-20250610:1m'
     // Persist the base model ID for CLI compatibility and context tier separately
     const colonIdx = modelId.indexOf(':')
     const baseId = colonIdx !== -1 ? modelId.slice(0, colonIdx) : modelId

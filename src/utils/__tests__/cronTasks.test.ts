@@ -61,7 +61,7 @@ describe('CronTaskMeta type coverage', () => {
         name: 'test-name',
         description: 'test description',
         folder: '/test/folder',
-        model: 'claude-opus-4-6',
+        model: 'claude-opus-4-7',
         permissionMode: 'ask',
         worktree: false,
         frequency: 'daily',

@@ -74,7 +74,7 @@ export type PewterLedgerVariant = 'trim' | 'cut' | 'cap' | null
  * guidance on plan file size.
  *
  * Baseline (control, 14d ending 2026-03-02, N=26.3M):
- *   p50 4,906 chars | p90 11,617 | mean 6,207 | 82% Opus 4.6
+ *   p50 4,906 chars | p90 11,617 | mean 6,207 | 82% Opus 4.7
  *   Reject rate monotonic with size: 20% at <2K → 50% at 20K+
  *
  * Primary: session-level Avg Cost (fact__201omjcij85f) — Opus output is

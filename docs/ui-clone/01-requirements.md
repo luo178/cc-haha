@@ -233,8 +233,8 @@ Leader 视图（默认）
 
 | 模型 | 描述 |
 |------|------|
-| Opus 4.6 | Most capable for ambitious work |
-| Opus 4.6 1M | Most capable for ambitious work |
+| Opus 4.7 | Most capable for ambitious work |
+| Opus 4.7 1M | Most capable for ambitious work |
 | Sonnet 4.6 | Most efficient for everyday tasks |
 | Haiku 4.5 | Fastest for quick answers |
 

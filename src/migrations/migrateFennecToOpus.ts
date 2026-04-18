@@ -4,7 +4,7 @@ import {
 } from '../utils/settings/settings.js'
 
 /**
- * Migrate users on removed fennec model aliases to their new Opus 4.6 aliases.
+ * Migrate users on removed fennec model aliases to their new Opus 4.7 aliases.
  * - fennec-latest → opus
  * - fennec-latest[1m] → opus[1m]
  * - fennec-fast-latest → opus[1m] + fast mode
