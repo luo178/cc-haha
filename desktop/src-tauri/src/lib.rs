@@ -16,6 +16,13 @@ use tauri_plugin_shell::{
     ShellExt,
 };
 
+mod terminal;
+
+use terminal::{
+    terminal_close, terminal_resize, terminal_start_session, terminal_write, stop_all_sessions,
+    TerminalState,
+};
+
 #[derive(Default)]
 struct ServerState(Mutex<ServerStatus>);
 
@@ -298,13 +305,18 @@ pub fn run() {
     let builder = tauri::Builder::default()
         .manage(ServerState::default())
         .manage(AdapterState::default())
+        .manage(TerminalState::default())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             get_server_url,
-            restart_adapters_sidecar
+            restart_adapters_sidecar,
+            terminal_start_session,
+            terminal_write,
+            terminal_resize,
+            terminal_close
         ]);
 
     // macOS: native menu bar (traffic-light overlay style)
@@ -403,6 +415,9 @@ pub fn run() {
         if matches!(event, RunEvent::Exit | RunEvent::ExitRequested { .. }) {
             stop_server_sidecar(app_handle);
             stop_adapters_sidecar(app_handle);
+            if let Some(state) = app_handle.try_state::<TerminalState>() {
+                stop_all_sessions(&state);
+            }
         }
     });
 }
